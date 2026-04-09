@@ -14,11 +14,13 @@ import static com.eap.common.constants.RabbitMQConstants.*;
 
 /**
  * Wallet Module RabbitMQ Configuration
- * 
+ *
  * This module consumes:
  * - order.create events (for wallet validation)
  * - order.matched events (for balance updates)
- * 
+ * - auction.bid.submitted events (for auction fund locking)
+ * - auction.cleared events (for auction settlement)
+ *
  * Topology: Each module gets its own queues bound to shared routing keys
  */
 @Configuration
@@ -57,8 +59,45 @@ public class RabbitMQConfig {
   }
 
   @Bean
-  public Binding walletOrderMatchedBinding(@Qualifier("walletOrderMatchedQueue") Queue walletOrderMatchedQueue, 
+  public Binding walletOrderMatchedBinding(@Qualifier("walletOrderMatchedQueue") Queue walletOrderMatchedQueue,
       TopicExchange orderExchange) {
     return BindingBuilder.bind(walletOrderMatchedQueue).to(orderExchange).with(ORDER_MATCHED_KEY);
+  }
+
+  // === Auction Exchange & Queues ===
+
+  @Bean
+  public TopicExchange auctionExchange() {
+    return new TopicExchange(AUCTION_EXCHANGE);
+  }
+
+  // Wallet-specific queue for auction bid submitted events (fund locking)
+  @Bean
+  public Queue walletAuctionBidSubmittedQueue() {
+    return QueueBuilder.durable(WALLET_AUCTION_BID_SUBMITTED_QUEUE)
+        .withArgument("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE)
+        .build();
+  }
+
+  // Wallet-specific queue for auction cleared events (settlement)
+  @Bean
+  public Queue walletAuctionClearedQueue() {
+    return QueueBuilder.durable(WALLET_AUCTION_CLEARED_QUEUE)
+        .withArgument("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE)
+        .build();
+  }
+
+  @Bean
+  public Binding walletAuctionBidSubmittedBinding(
+      @Qualifier("walletAuctionBidSubmittedQueue") Queue walletAuctionBidSubmittedQueue,
+      @Qualifier("auctionExchange") TopicExchange auctionExchange) {
+    return BindingBuilder.bind(walletAuctionBidSubmittedQueue).to(auctionExchange).with(AUCTION_BID_SUBMITTED_KEY);
+  }
+
+  @Bean
+  public Binding walletAuctionClearedBinding(
+      @Qualifier("walletAuctionClearedQueue") Queue walletAuctionClearedQueue,
+      @Qualifier("auctionExchange") TopicExchange auctionExchange) {
+    return BindingBuilder.bind(walletAuctionClearedQueue).to(auctionExchange).with(AUCTION_CLEARED_KEY);
   }
 }
