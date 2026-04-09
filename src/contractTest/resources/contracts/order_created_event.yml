@@ -1,0 +1,16 @@
+description: When CreateOrderListener processes OrderSubmittedEvent, it should emit OrderConfirmedEvent
+label: order_submitted_to_confirmed
+name: order_submitted_to_confirmed
+input:
+  triggeredBy: processOrderCreate()
+outputMessage:
+  sentTo: order.exchange
+  body:
+    orderId: "123e4567-e89b-12d3-a456-426614174000"
+    userId: "123e4567-e89b-12d3-a456-426614174000"
+    price: 100
+    amount: 1
+    orderType: "BUY"
+    createdAt: "2025-07-16T12:00:00.000000"
+  headers:
+    rabbitmq_routingKey: order.confirmed

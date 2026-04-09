@@ -1,0 +1,79 @@
+# eap-wallet — LLM Context
+
+> Port 8081 | Context Path: /eap-wallet
+> OpenAPI spec: `docs/api/wallet-service.json`
+
+## API Endpoints
+
+| Endpoint | Description | Involves |
+|----------|-------------|----------|
+| POST /v1/wallet/register | 註冊用戶並建立錢包（初始餘額 10000） | wallet (DB) |
+| POST /v1/wallet/check | 內部：驗證餘額是否足夠（通常由 RabbitMQ 觸發） | wallet (DB, optimistic lock) |
+| GET /v1/wallet/status/{userId} | 查詢錢包餘額 | wallet (DB) |
+| GET /v1/wallet/exists/{userId} | 確認用戶是否存在 | wallet (DB) |
+| GET /v1/wallet/users | 列出已註冊用戶 ID | wallet (DB) |
+
+## Database Schema (wallet_service)
+
+**Table: wallets** — User wallet balances
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGSERIAL PK | |
+| user_id | UUID UNIQUE NOT NULL | |
+| available_amount | INTEGER | Default 0 (tradable electricity units) |
+| locked_amount | INTEGER | Default 0 (reserved for pending orders) |
+| available_currency | INTEGER | Default 0 (tradable currency) |
+| locked_currency | INTEGER | Default 0 (reserved for pending orders) |
+| version | BIGINT NOT NULL | Default 0 (optimistic locking) |
+| update_time | TIMESTAMP | Default CURRENT_TIMESTAMP |
+
+**Table: outbox** — Outbox pattern for reliable event publishing
+| Column | Type | Notes |
+|--------|------|-------|
+| id | BIGSERIAL PK | |
+| event_type | VARCHAR(50) NOT NULL | e.g. OrderConfirmedEvent, OrderFailedEvent |
+| routing_key | VARCHAR(50) NOT NULL | RabbitMQ routing key |
+| payload | TEXT NOT NULL | JSON-serialized event |
+| status | VARCHAR(10) | Default 'PENDING'. Values: PENDING → SENT |
+| created_at | TIMESTAMP | Default CURRENT_TIMESTAMP |
+| Partial index on status='PENDING' for poller efficiency |
+
+## Outbox Pattern
+
+eap-wallet is the only service using the Outbox pattern. Business logic and event writing happen
+in the same DB transaction to avoid dual-write problems:
+
+1. `CreateOrderListener` receives `OrderSubmittedEvent` from RabbitMQ
+2. Validates balance → locks funds → writes `OrderConfirmedEvent` (or `OrderFailedEvent`) to outbox table
+3. `OutboxPoller` (`@Scheduled(fixedDelay = 500)`) reads PENDING rows (按 createdAt ASC) and publishes to RabbitMQ
+   - **fixedDelay**（非 fixedRate）：上一次執行完成後再等 500ms，不會疊加執行
+4. After successful publish, marks row as SENT
+5. 發布失敗時：catch block 僅 log error，不更新 status → PENDING 保留，下次 poll 自動重試（at-least-once 語意）
+
+### Cleanup Job
+
+`@Scheduled(fixedDelay = 3600000)` — 每小時執行一次：
+- 刪除 status = `SENT` 且 created_at > 24 小時前的記錄
+- **永不刪除 PENDING 記錄**，確保未發布的事件不會遺失
+
+### Poller 停機恢復
+
+Poller 隨 Spring Boot 生命週期運行。若服務重啟：
+- 所有 PENDING 記錄仍在 PostgreSQL 中，重啟後 500ms 內自動補發
+- 可能導致重複發布（at-least-once）→ 下游服務需具備冪等性（matchEngine 用 `match:processed:{matchId}` SETNX 保護）
+
+## RabbitMQ Listeners
+
+| Queue | Listener Class | Handles |
+|-------|---------------|---------|
+| wallet.orderSubmitted.queue | CreateOrderListener | Balance check + lock funds → write Outbox |
+| wallet.orderMatched.queue | MatchedOrderListener | Settle funds (unlock + transfer) |
+
+## Key Files
+
+| What | Path |
+|------|------|
+| Controllers | src/main/java/com/eap/eap_wallet/controller/ |
+| Listeners | src/main/java/com/eap/eap_wallet/listener/ |
+| Outbox Poller | src/main/java/com/eap/eap_wallet/application/OutboxPoller.java |
+| Liquibase | src/main/resources/db/changelog/ |
