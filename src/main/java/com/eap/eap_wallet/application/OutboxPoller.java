@@ -1,6 +1,7 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.common.constants.RabbitMQConstants;
+import com.eap.common.event.AuctionBidConfirmedEvent;
 import com.eap.common.event.OrderConfirmedEvent;
 import com.eap.common.event.OrderFailedEvent;
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
@@ -31,8 +32,9 @@ public class OutboxPoller {
         for (OutboxEntity entry : pending) {
             try {
                 Object event = deserializeEvent(entry);
+                String exchange = resolveExchange(entry.getEventType());
                 rabbitTemplate.convertAndSend(
-                        RabbitMQConstants.ORDER_EXCHANGE,
+                        exchange,
                         entry.getRoutingKey(),
                         event
                 );
@@ -57,7 +59,15 @@ public class OutboxPoller {
         return switch (entry.getEventType()) {
             case "OrderConfirmedEvent" -> objectMapper.readValue(entry.getPayload(), OrderConfirmedEvent.class);
             case "OrderFailedEvent" -> objectMapper.readValue(entry.getPayload(), OrderFailedEvent.class);
+            case "AuctionBidConfirmedEvent" -> objectMapper.readValue(entry.getPayload(), AuctionBidConfirmedEvent.class);
             default -> throw new IllegalArgumentException("Unknown event type: " + entry.getEventType());
+        };
+    }
+
+    private String resolveExchange(String eventType) {
+        return switch (eventType) {
+            case "AuctionBidConfirmedEvent" -> RabbitMQConstants.AUCTION_EXCHANGE;
+            default -> RabbitMQConstants.ORDER_EXCHANGE;
         };
     }
 }

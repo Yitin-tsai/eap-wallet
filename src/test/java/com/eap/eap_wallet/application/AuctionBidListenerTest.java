@@ -1,14 +1,19 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.common.event.AuctionBidSubmittedEvent;
+import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
+import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
+import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.LocalDateTime;
@@ -23,6 +28,12 @@ class AuctionBidListenerTest {
 
     @Mock
     private WalletRepository walletRepository;
+
+    @Mock
+    private OutboxRepository outboxRepository;
+
+    @Spy
+    private ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
     @InjectMocks
     private AuctionBidListener auctionBidListener;
@@ -64,85 +75,82 @@ class AuctionBidListenerTest {
     }
 
     // -------------------------------------------------------------------------
-    // BUY: lock currency
+    // BUY: lock currency + write outbox
     // -------------------------------------------------------------------------
 
     @Test
-    void buy_sufficientCurrency_shouldLockCurrency() {
-        // Given
+    void buy_sufficientCurrency_shouldLockCurrencyAndWriteOutbox() {
         WalletEntity wallet = buildWallet(10000, 0, 100, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
         AuctionBidSubmittedEvent event = buildEvent("BUY", 3000);
 
-        // When
         auctionBidListener.onAuctionBidSubmitted(event);
 
-        // Then
-        ArgumentCaptor<WalletEntity> captor = ArgumentCaptor.forClass(WalletEntity.class);
-        verify(walletRepository).save(captor.capture());
-        WalletEntity saved = captor.getValue();
+        // Verify wallet lock
+        ArgumentCaptor<WalletEntity> walletCaptor = ArgumentCaptor.forClass(WalletEntity.class);
+        verify(walletRepository).save(walletCaptor.capture());
+        WalletEntity saved = walletCaptor.getValue();
         assertEquals(7000, saved.getAvailableCurrency());
         assertEquals(3000, saved.getLockedCurrency());
-        // energy fields untouched
         assertEquals(100, saved.getAvailableAmount());
         assertEquals(0, saved.getLockedAmount());
+
+        // Verify outbox entry
+        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
+        verify(outboxRepository).save(outboxCaptor.capture());
+        OutboxEntity outbox = outboxCaptor.getValue();
+        assertEquals("AuctionBidConfirmedEvent", outbox.getEventType());
+        assertEquals("auction.bid.confirmed", outbox.getRoutingKey());
     }
 
     @Test
-    void buy_insufficientCurrency_shouldThrowAndNotSave() {
-        // Given
+    void buy_insufficientCurrency_shouldNotSaveAndNotWriteOutbox() {
         WalletEntity wallet = buildWallet(1000, 0, 100, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
-        AuctionBidSubmittedEvent event = buildEvent("BUY", 5000); // 5000 > 1000
+        AuctionBidSubmittedEvent event = buildEvent("BUY", 5000);
 
-        // When — should throw to make failure visible (W-1 fix)
-        assertThrows(IllegalStateException.class,
-                () -> auctionBidListener.onAuctionBidSubmitted(event));
+        // Should not throw — just logs warning and returns
+        assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
 
-        // Then — wallet must not be modified
         verify(walletRepository, never()).save(any(WalletEntity.class));
+        verify(outboxRepository, never()).save(any(OutboxEntity.class));
         assertEquals(1000, wallet.getAvailableCurrency());
         assertEquals(0, wallet.getLockedCurrency());
     }
 
     // -------------------------------------------------------------------------
-    // SELL: lock amount (energy)
+    // SELL: lock amount (energy) + write outbox
     // -------------------------------------------------------------------------
 
     @Test
-    void sell_sufficientAmount_shouldLockAmount() {
-        // Given
+    void sell_sufficientAmount_shouldLockAmountAndWriteOutbox() {
         WalletEntity wallet = buildWallet(0, 0, 500, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
         AuctionBidSubmittedEvent event = buildEvent("SELL", 200);
 
-        // When
         auctionBidListener.onAuctionBidSubmitted(event);
 
-        // Then
-        ArgumentCaptor<WalletEntity> captor = ArgumentCaptor.forClass(WalletEntity.class);
-        verify(walletRepository).save(captor.capture());
-        WalletEntity saved = captor.getValue();
+        ArgumentCaptor<WalletEntity> walletCaptor = ArgumentCaptor.forClass(WalletEntity.class);
+        verify(walletRepository).save(walletCaptor.capture());
+        WalletEntity saved = walletCaptor.getValue();
         assertEquals(300, saved.getAvailableAmount());
         assertEquals(200, saved.getLockedAmount());
-        // currency fields untouched
         assertEquals(0, saved.getAvailableCurrency());
         assertEquals(0, saved.getLockedCurrency());
+
+        verify(outboxRepository).save(any(OutboxEntity.class));
     }
 
     @Test
-    void sell_insufficientAmount_shouldThrowAndNotSave() {
-        // Given
+    void sell_insufficientAmount_shouldNotSaveAndNotWriteOutbox() {
         WalletEntity wallet = buildWallet(0, 0, 100, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
-        AuctionBidSubmittedEvent event = buildEvent("SELL", 200); // 200 > 100
+        AuctionBidSubmittedEvent event = buildEvent("SELL", 200);
 
-        // When — should throw to make failure visible (W-1 fix)
-        assertThrows(IllegalStateException.class,
-                () -> auctionBidListener.onAuctionBidSubmitted(event));
+        assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
 
-        // Then
         verify(walletRepository, never()).save(any(WalletEntity.class));
+        verify(outboxRepository, never()).save(any(OutboxEntity.class));
         assertEquals(100, wallet.getAvailableAmount());
         assertEquals(0, wallet.getLockedAmount());
     }
@@ -152,16 +160,14 @@ class AuctionBidListenerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void walletNotFound_shouldNotThrowAndNotSave() {
-        // Given
+    void walletNotFound_shouldNotThrowAndNotSaveAndNotWriteOutbox() {
         when(walletRepository.findByUserId(testUserId)).thenReturn(null);
         AuctionBidSubmittedEvent event = buildEvent("BUY", 1000);
 
-        // When
         assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
 
-        // Then
         verify(walletRepository, never()).save(any(WalletEntity.class));
+        verify(outboxRepository, never()).save(any(OutboxEntity.class));
     }
 
     // -------------------------------------------------------------------------
@@ -169,38 +175,36 @@ class AuctionBidListenerTest {
     // -------------------------------------------------------------------------
 
     @Test
-    void buy_exactBalance_shouldLockCurrency() {
-        // Given
+    void buy_exactBalance_shouldLockCurrencyAndWriteOutbox() {
         WalletEntity wallet = buildWallet(3000, 0, 0, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
         AuctionBidSubmittedEvent event = buildEvent("BUY", 3000);
 
-        // When
         auctionBidListener.onAuctionBidSubmitted(event);
 
-        // Then
-        ArgumentCaptor<WalletEntity> captor = ArgumentCaptor.forClass(WalletEntity.class);
-        verify(walletRepository).save(captor.capture());
-        WalletEntity saved = captor.getValue();
+        ArgumentCaptor<WalletEntity> walletCaptor = ArgumentCaptor.forClass(WalletEntity.class);
+        verify(walletRepository).save(walletCaptor.capture());
+        WalletEntity saved = walletCaptor.getValue();
         assertEquals(0, saved.getAvailableCurrency());
         assertEquals(3000, saved.getLockedCurrency());
+
+        verify(outboxRepository).save(any(OutboxEntity.class));
     }
 
     @Test
-    void sell_exactBalance_shouldLockAmount() {
-        // Given
+    void sell_exactBalance_shouldLockAmountAndWriteOutbox() {
         WalletEntity wallet = buildWallet(0, 0, 200, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
         AuctionBidSubmittedEvent event = buildEvent("SELL", 200);
 
-        // When
         auctionBidListener.onAuctionBidSubmitted(event);
 
-        // Then
-        ArgumentCaptor<WalletEntity> captor = ArgumentCaptor.forClass(WalletEntity.class);
-        verify(walletRepository).save(captor.capture());
-        WalletEntity saved = captor.getValue();
+        ArgumentCaptor<WalletEntity> walletCaptor = ArgumentCaptor.forClass(WalletEntity.class);
+        verify(walletRepository).save(walletCaptor.capture());
+        WalletEntity saved = walletCaptor.getValue();
         assertEquals(0, saved.getAvailableAmount());
         assertEquals(200, saved.getLockedAmount());
+
+        verify(outboxRepository).save(any(OutboxEntity.class));
     }
 }
