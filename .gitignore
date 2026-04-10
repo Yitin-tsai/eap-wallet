@@ -26,3 +26,5 @@ Thumbs.db
 *.log
 *.tmp
 *.swp
+bin/
+bin/
