@@ -89,14 +89,15 @@ class AuctionBidListenerTest {
     }
 
     @Test
-    void buy_insufficientCurrency_shouldNotSaveAndNotThrow() {
+    void buy_insufficientCurrency_shouldThrowAndNotSave() {
         // Given
         WalletEntity wallet = buildWallet(1000, 0, 100, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
         AuctionBidSubmittedEvent event = buildEvent("BUY", 5000); // 5000 > 1000
 
-        // When — should not throw
-        assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
+        // When — should throw to make failure visible (W-1 fix)
+        assertThrows(IllegalStateException.class,
+                () -> auctionBidListener.onAuctionBidSubmitted(event));
 
         // Then — wallet must not be modified
         verify(walletRepository, never()).save(any(WalletEntity.class));
@@ -130,14 +131,15 @@ class AuctionBidListenerTest {
     }
 
     @Test
-    void sell_insufficientAmount_shouldNotSaveAndNotThrow() {
+    void sell_insufficientAmount_shouldThrowAndNotSave() {
         // Given
         WalletEntity wallet = buildWallet(0, 0, 100, 0);
         when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
         AuctionBidSubmittedEvent event = buildEvent("SELL", 200); // 200 > 100
 
-        // When
-        assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
+        // When — should throw to make failure visible (W-1 fix)
+        assertThrows(IllegalStateException.class,
+                () -> auctionBidListener.onAuctionBidSubmitted(event));
 
         // Then
         verify(walletRepository, never()).save(any(WalletEntity.class));

@@ -11,6 +11,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
 
 import java.time.LocalDateTime;
 import java.util.Arrays;
@@ -28,6 +30,9 @@ class AuctionSettlementListenerTest {
     @Mock
     private WalletRepository walletRepository;
 
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
     @InjectMocks
     private AuctionSettlementListener auctionSettlementListener;
 
@@ -40,6 +45,10 @@ class AuctionSettlementListenerTest {
         buyerUserId = UUID.randomUUID();
         sellerUserId = UUID.randomUUID();
         testAuctionId = "auction-001";
+
+        // Mock TransactionTemplate behavior: execute callback directly
+        TransactionStatus mockStatus = mock(TransactionStatus.class);
+        lenient().when(transactionManager.getTransaction(any())).thenReturn(mockStatus);
     }
 
     // -------------------------------------------------------------------------

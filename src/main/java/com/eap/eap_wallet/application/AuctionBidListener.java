@@ -45,17 +45,17 @@ public class AuctionBidListener {
 
         if ("BUY".equals(event.getSide())) {
             if (wallet.getAvailableCurrency() < totalLocked) {
-                log.warn("Insufficient currency for auction bid: userId={}, required={}, available={}",
-                        event.getUserId(), totalLocked, wallet.getAvailableCurrency());
-                return;
+                throw new IllegalStateException(String.format(
+                        "Insufficient currency for auction bid: userId=%s, required=%d, available=%d",
+                        event.getUserId(), totalLocked, wallet.getAvailableCurrency()));
             }
             wallet.setAvailableCurrency(wallet.getAvailableCurrency() - totalLocked);
             wallet.setLockedCurrency(wallet.getLockedCurrency() + totalLocked);
         } else if ("SELL".equals(event.getSide())) {
             if (wallet.getAvailableAmount() < totalLocked) {
-                log.warn("Insufficient energy amount for auction bid: userId={}, required={}, available={}",
-                        event.getUserId(), totalLocked, wallet.getAvailableAmount());
-                return;
+                throw new IllegalStateException(String.format(
+                        "Insufficient energy amount for auction bid: userId=%s, required=%d, available=%d",
+                        event.getUserId(), totalLocked, wallet.getAvailableAmount()));
             }
             wallet.setAvailableAmount(wallet.getAvailableAmount() - totalLocked);
             wallet.setLockedAmount(wallet.getLockedAmount() + totalLocked);

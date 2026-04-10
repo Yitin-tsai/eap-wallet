@@ -8,7 +8,8 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import static com.eap.common.constants.RabbitMQConstants.WALLET_AUCTION_CLEARED_QUEUE;
 
@@ -45,8 +46,10 @@ public class AuctionSettlementListener {
     @Autowired
     private WalletRepository walletRepository;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
     @RabbitListener(queues = WALLET_AUCTION_CLEARED_QUEUE)
-    @Transactional
     public void handleAuctionCleared(AuctionClearedEvent event) {
         log.info("Received AuctionClearedEvent: auctionId={}, status={}, MCP={}, MCV={}, results={}",
                 event.getAuctionId(), event.getStatus(), event.getClearingPrice(),
@@ -59,25 +62,26 @@ public class AuctionSettlementListener {
         }
 
         int settledCount = 0;
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
 
         for (AuctionBidResult result : event.getResults()) {
             try {
-                WalletEntity wallet = walletRepository.findByUserId(result.getUserId());
-                if (wallet == null) {
-                    log.error("Wallet not found for userId={} during auction settlement", result.getUserId());
-                    continue;
-                }
+                txTemplate.executeWithoutResult(status -> {
+                    WalletEntity wallet = walletRepository.findByUserId(result.getUserId());
+                    if (wallet == null) {
+                        throw new IllegalStateException("Wallet not found for userId=" + result.getUserId());
+                    }
 
-                if ("BUY".equals(result.getSide())) {
-                    settleBuyer(wallet, result);
-                } else if ("SELL".equals(result.getSide())) {
-                    settleSeller(wallet, result);
-                } else {
-                    log.error("Unknown side '{}' for userId={}", result.getSide(), result.getUserId());
-                    continue;
-                }
+                    if ("BUY".equals(result.getSide())) {
+                        settleBuyer(wallet, result);
+                    } else if ("SELL".equals(result.getSide())) {
+                        settleSeller(wallet, result);
+                    } else {
+                        throw new IllegalArgumentException("Unknown side '" + result.getSide() + "' for userId=" + result.getUserId());
+                    }
 
-                walletRepository.save(wallet);
+                    walletRepository.save(wallet);
+                });
                 settledCount++;
             } catch (Exception e) {
                 log.error("Settlement failed for userId={}: {}", result.getUserId(), e.getMessage(), e);
