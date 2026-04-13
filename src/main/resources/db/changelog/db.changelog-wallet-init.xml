@@ -117,4 +117,27 @@
         <sql>CREATE INDEX idx_outbox_status ON wallet_service.outbox(status) WHERE status = 'PENDING';</sql>
     </changeSet>
 
+    <changeSet id="wallet-011" author="eap">
+        <comment>RISK-4: settlement_idempotency table for AuctionSettlementListener duplicate protection</comment>
+        <createTable tableName="settlement_idempotency" schemaName="wallet_service">
+            <column name="id" type="BIGSERIAL">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="auction_id" type="VARCHAR(20)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="side" type="VARCHAR(4)">
+                <constraints nullable="false"/>
+            </column>
+            <column name="settled_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint tableName="settlement_idempotency" schemaName="wallet_service"
+            columnNames="auction_id, user_id, side" constraintName="uk_settlement_idempotency"/>
+    </changeSet>
+
 </databaseChangeLog>

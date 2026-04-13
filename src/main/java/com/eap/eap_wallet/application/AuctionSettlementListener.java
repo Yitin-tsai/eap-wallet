@@ -1,6 +1,8 @@
 package com.eap.eap_wallet.application;
 
+import com.eap.eap_wallet.configuration.repository.SettlementIdempotencyRepository;
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
+import com.eap.eap_wallet.domain.entity.SettlementIdempotencyEntity;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
 import com.eap.common.event.AuctionClearedEvent;
 import com.eap.common.event.AuctionClearedEvent.AuctionBidResult;
@@ -47,6 +49,9 @@ public class AuctionSettlementListener {
     private WalletRepository walletRepository;
 
     @Autowired
+    private SettlementIdempotencyRepository settlementIdempotencyRepository;
+
+    @Autowired
     private PlatformTransactionManager transactionManager;
 
     @RabbitListener(queues = WALLET_AUCTION_CLEARED_QUEUE)
@@ -67,6 +72,14 @@ public class AuctionSettlementListener {
         for (AuctionBidResult result : event.getResults()) {
             try {
                 txTemplate.executeWithoutResult(status -> {
+                    // Idempotency guard: skip if already settled
+                    if (settlementIdempotencyRepository.existsByAuctionIdAndUserIdAndSide(
+                            event.getAuctionId(), result.getUserId(), result.getSide())) {
+                        log.info("Settlement already processed, skipping: auctionId={}, userId={}, side={}",
+                                event.getAuctionId(), result.getUserId(), result.getSide());
+                        return;
+                    }
+
                     WalletEntity wallet = walletRepository.findByUserId(result.getUserId());
                     if (wallet == null) {
                         throw new IllegalStateException("Wallet not found for userId=" + result.getUserId());
@@ -81,6 +94,13 @@ public class AuctionSettlementListener {
                     }
 
                     walletRepository.save(wallet);
+
+                    // Record idempotency entry (same transaction as wallet save)
+                    settlementIdempotencyRepository.save(SettlementIdempotencyEntity.builder()
+                            .auctionId(event.getAuctionId())
+                            .userId(result.getUserId())
+                            .side(result.getSide())
+                            .build());
                 });
                 settledCount++;
             } catch (Exception e) {
