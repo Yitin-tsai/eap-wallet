@@ -15,6 +15,10 @@ import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.Spy;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.DefaultTransactionDefinition;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -35,6 +39,9 @@ class AuctionBidListenerTest {
     @Spy
     private ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
 
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
     @InjectMocks
     private AuctionBidListener auctionBidListener;
 
@@ -45,6 +52,11 @@ class AuctionBidListenerTest {
     void setUp() {
         testUserId = UUID.randomUUID();
         testAuctionId = "auction-001";
+
+        // Make TransactionTemplate execute the callback directly
+        TransactionStatus mockStatus = mock(TransactionStatus.class);
+        lenient().when(transactionManager.getTransaction(any(DefaultTransactionDefinition.class)))
+                .thenReturn(mockStatus);
     }
 
     // -------------------------------------------------------------------------
@@ -206,5 +218,65 @@ class AuctionBidListenerTest {
         assertEquals(200, saved.getLockedAmount());
 
         verify(outboxRepository).save(any(OutboxEntity.class));
+    }
+
+    // -------------------------------------------------------------------------
+    // OptimisticLockException retry
+    // -------------------------------------------------------------------------
+
+    @Test
+    void optimisticLock_firstAttemptFails_secondSucceeds_shouldRetryAndLockFunds() {
+        WalletEntity wallet = buildWallet(10000, 0, 0, 0);
+
+        // First call throws optimistic lock, second call returns wallet
+        when(walletRepository.findByUserId(testUserId))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenReturn(wallet);
+
+        AuctionBidSubmittedEvent event = buildEvent("BUY", 3000);
+        assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
+
+        // Wallet and outbox should be saved on the successful 2nd attempt
+        verify(walletRepository, times(1)).save(wallet);
+        verify(outboxRepository, times(1)).save(any(OutboxEntity.class));
+        assertEquals(7000, wallet.getAvailableCurrency());
+        assertEquals(3000, wallet.getLockedCurrency());
+    }
+
+    @Test
+    void optimisticLock_allThreeAttemptsFail_shouldThrowAfterMaxRetries() {
+        // All 3 attempts throw ObjectOptimisticLockingFailureException
+        when(walletRepository.findByUserId(testUserId))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L));
+
+        AuctionBidSubmittedEvent event = buildEvent("BUY", 3000);
+        // After max retries AuctionBidListener re-throws the exception
+        assertThrows(ObjectOptimisticLockingFailureException.class,
+                () -> auctionBidListener.onAuctionBidSubmitted(event));
+
+        verify(walletRepository, never()).save(any());
+        verify(outboxRepository, never()).save(any());
+        // findByUserId called 3 times (one per retry attempt)
+        verify(walletRepository, times(3)).findByUserId(testUserId);
+    }
+
+    @Test
+    void optimisticLock_twoFailuresThenSuccess_shouldSettleOnThirdAttempt() {
+        WalletEntity wallet = buildWallet(5000, 0, 0, 0);
+
+        when(walletRepository.findByUserId(testUserId))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenReturn(wallet);
+
+        AuctionBidSubmittedEvent event = buildEvent("BUY", 2000);
+        assertDoesNotThrow(() -> auctionBidListener.onAuctionBidSubmitted(event));
+
+        verify(walletRepository, times(1)).save(wallet);
+        verify(outboxRepository, times(1)).save(any(OutboxEntity.class));
+        assertEquals(3000, wallet.getAvailableCurrency());
+        assertEquals(2000, wallet.getLockedCurrency());
     }
 }
