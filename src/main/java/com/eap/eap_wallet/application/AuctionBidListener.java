@@ -11,8 +11,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import static com.eap.common.constants.RabbitMQConstants.*;
 
@@ -41,61 +43,81 @@ public class AuctionBidListener {
     @Autowired
     private ObjectMapper objectMapper;
 
+    @Autowired
+    private PlatformTransactionManager transactionManager;
+
     @RabbitListener(queues = WALLET_AUCTION_BID_SUBMITTED_QUEUE)
-    @Transactional
     public void onAuctionBidSubmitted(AuctionBidSubmittedEvent event) {
         log.info("Received AuctionBidSubmittedEvent: auctionId={}, userId={}, side={}, totalLocked={}",
                 event.getAuctionId(), event.getUserId(), event.getSide(), event.getTotalLocked());
 
-        WalletEntity wallet = walletRepository.findByUserId(event.getUserId());
-        if (wallet == null) {
-            log.error("Wallet not found for userId={}, cannot lock auction bid funds", event.getUserId());
-            return;
-        }
+        TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
+        int maxRetries = 3;
 
-        Integer totalLocked = event.getTotalLocked();
+        for (int attempt = 1; attempt <= maxRetries; attempt++) {
+            try {
+                txTemplate.executeWithoutResult(status -> {
+                    WalletEntity wallet = walletRepository.findByUserId(event.getUserId());
+                    if (wallet == null) {
+                        log.error("Wallet not found for userId={}, cannot lock auction bid funds", event.getUserId());
+                        return;
+                    }
 
-        if ("BUY".equals(event.getSide())) {
-            if (wallet.getAvailableCurrency() < totalLocked) {
-                log.warn("Insufficient currency for auction bid: userId={}, required={}, available={}",
-                        event.getUserId(), totalLocked, wallet.getAvailableCurrency());
-                return;
+                    Integer totalLocked = event.getTotalLocked();
+
+                    if ("BUY".equals(event.getSide())) {
+                        if (wallet.getAvailableCurrency() < totalLocked) {
+                            log.warn("Insufficient currency for auction bid: userId={}, required={}, available={}",
+                                    event.getUserId(), totalLocked, wallet.getAvailableCurrency());
+                            return;
+                        }
+                        wallet.setAvailableCurrency(wallet.getAvailableCurrency() - totalLocked);
+                        wallet.setLockedCurrency(wallet.getLockedCurrency() + totalLocked);
+                    } else if ("SELL".equals(event.getSide())) {
+                        if (wallet.getAvailableAmount() < totalLocked) {
+                            log.warn("Insufficient energy for auction bid: userId={}, required={}, available={}",
+                                    event.getUserId(), totalLocked, wallet.getAvailableAmount());
+                            return;
+                        }
+                        wallet.setAvailableAmount(wallet.getAvailableAmount() - totalLocked);
+                        wallet.setLockedAmount(wallet.getLockedAmount() + totalLocked);
+                    } else {
+                        log.error("Unknown bid side: {}", event.getSide());
+                        return;
+                    }
+
+                    walletRepository.save(wallet);
+
+                    // Write confirmed event to outbox (same transaction as wallet lock)
+                    AuctionBidConfirmedEvent confirmedEvent = AuctionBidConfirmedEvent.builder()
+                            .auctionId(event.getAuctionId())
+                            .userId(event.getUserId())
+                            .side(event.getSide())
+                            .steps(event.getSteps())
+                            .totalLocked(totalLocked)
+                            .createdAt(event.getCreatedAt())
+                            .build();
+
+                    try {
+                        String payload = objectMapper.writeValueAsString(confirmedEvent);
+                        outboxRepository.save(new OutboxEntity("AuctionBidConfirmedEvent", AUCTION_BID_CONFIRMED_KEY, payload));
+                    } catch (JsonProcessingException e) {
+                        throw new RuntimeException("Failed to serialize AuctionBidConfirmedEvent", e);
+                    }
+
+                    log.info("Auction bid funds locked and confirmed event written to outbox: userId={}, side={}, locked={}",
+                            event.getUserId(), event.getSide(), totalLocked);
+                });
+                break; // success, exit retry loop
+            } catch (ObjectOptimisticLockingFailureException e) {
+                if (attempt == maxRetries) {
+                    log.error("Bid fund locking failed after {} retries due to optimistic lock conflict: auctionId={}, userId={}",
+                            maxRetries, event.getAuctionId(), event.getUserId(), e);
+                    throw e;
+                }
+                log.warn("Optimistic lock conflict on bid fund lock attempt {}/{}: auctionId={}, userId={}, retrying...",
+                        attempt, maxRetries, event.getAuctionId(), event.getUserId());
             }
-            wallet.setAvailableCurrency(wallet.getAvailableCurrency() - totalLocked);
-            wallet.setLockedCurrency(wallet.getLockedCurrency() + totalLocked);
-        } else if ("SELL".equals(event.getSide())) {
-            if (wallet.getAvailableAmount() < totalLocked) {
-                log.warn("Insufficient energy for auction bid: userId={}, required={}, available={}",
-                        event.getUserId(), totalLocked, wallet.getAvailableAmount());
-                return;
-            }
-            wallet.setAvailableAmount(wallet.getAvailableAmount() - totalLocked);
-            wallet.setLockedAmount(wallet.getLockedAmount() + totalLocked);
-        } else {
-            log.error("Unknown bid side: {}", event.getSide());
-            return;
         }
-
-        walletRepository.save(wallet);
-
-        // Write confirmed event to outbox (same transaction as wallet lock)
-        AuctionBidConfirmedEvent confirmedEvent = AuctionBidConfirmedEvent.builder()
-                .auctionId(event.getAuctionId())
-                .userId(event.getUserId())
-                .side(event.getSide())
-                .steps(event.getSteps())
-                .totalLocked(totalLocked)
-                .createdAt(event.getCreatedAt())
-                .build();
-
-        try {
-            String payload = objectMapper.writeValueAsString(confirmedEvent);
-            outboxRepository.save(new OutboxEntity("AuctionBidConfirmedEvent", AUCTION_BID_CONFIRMED_KEY, payload));
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize AuctionBidConfirmedEvent", e);
-        }
-
-        log.info("Auction bid funds locked and confirmed event written to outbox: userId={}, side={}, locked={}",
-                event.getUserId(), event.getSide(), totalLocked);
     }
 }

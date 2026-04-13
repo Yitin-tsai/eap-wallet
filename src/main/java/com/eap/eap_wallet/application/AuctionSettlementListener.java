@@ -9,6 +9,7 @@ import com.eap.common.event.AuctionClearedEvent.AuctionBidResult;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -70,41 +71,55 @@ public class AuctionSettlementListener {
         TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
 
         for (AuctionBidResult result : event.getResults()) {
-            try {
-                txTemplate.executeWithoutResult(status -> {
-                    // Idempotency guard: skip if already settled
-                    if (settlementIdempotencyRepository.existsByAuctionIdAndUserIdAndSide(
-                            event.getAuctionId(), result.getUserId(), result.getSide())) {
-                        log.info("Settlement already processed, skipping: auctionId={}, userId={}, side={}",
-                                event.getAuctionId(), result.getUserId(), result.getSide());
-                        return;
-                    }
+            int maxRetries = 3;
+            boolean settled = false;
+            for (int attempt = 1; attempt <= maxRetries && !settled; attempt++) {
+                try {
+                    txTemplate.executeWithoutResult(status -> {
+                        // Idempotency guard: skip if already settled
+                        if (settlementIdempotencyRepository.existsByAuctionIdAndUserIdAndSide(
+                                event.getAuctionId(), result.getUserId(), result.getSide())) {
+                            log.info("Settlement already processed, skipping: auctionId={}, userId={}, side={}",
+                                    event.getAuctionId(), result.getUserId(), result.getSide());
+                            return;
+                        }
 
-                    WalletEntity wallet = walletRepository.findByUserId(result.getUserId());
-                    if (wallet == null) {
-                        throw new IllegalStateException("Wallet not found for userId=" + result.getUserId());
-                    }
+                        WalletEntity wallet = walletRepository.findByUserId(result.getUserId());
+                        if (wallet == null) {
+                            throw new IllegalStateException("Wallet not found for userId=" + result.getUserId());
+                        }
 
-                    if ("BUY".equals(result.getSide())) {
-                        settleBuyer(wallet, result);
-                    } else if ("SELL".equals(result.getSide())) {
-                        settleSeller(wallet, result);
+                        if ("BUY".equals(result.getSide())) {
+                            settleBuyer(wallet, result);
+                        } else if ("SELL".equals(result.getSide())) {
+                            settleSeller(wallet, result);
+                        } else {
+                            throw new IllegalArgumentException("Unknown side '" + result.getSide() + "' for userId=" + result.getUserId());
+                        }
+
+                        walletRepository.save(wallet);
+
+                        // Record idempotency entry (same transaction as wallet save)
+                        settlementIdempotencyRepository.save(SettlementIdempotencyEntity.builder()
+                                .auctionId(event.getAuctionId())
+                                .userId(result.getUserId())
+                                .side(result.getSide())
+                                .build());
+                    });
+                    settled = true;
+                    settledCount++;
+                } catch (ObjectOptimisticLockingFailureException e) {
+                    if (attempt == maxRetries) {
+                        log.error("Settlement failed after {} retries due to optimistic lock conflict: auctionId={}, userId={}",
+                                maxRetries, event.getAuctionId(), result.getUserId(), e);
                     } else {
-                        throw new IllegalArgumentException("Unknown side '" + result.getSide() + "' for userId=" + result.getUserId());
+                        log.warn("Optimistic lock conflict on settlement attempt {}/{}: auctionId={}, userId={}, retrying...",
+                                attempt, maxRetries, event.getAuctionId(), result.getUserId());
                     }
-
-                    walletRepository.save(wallet);
-
-                    // Record idempotency entry (same transaction as wallet save)
-                    settlementIdempotencyRepository.save(SettlementIdempotencyEntity.builder()
-                            .auctionId(event.getAuctionId())
-                            .userId(result.getUserId())
-                            .side(result.getSide())
-                            .build());
-                });
-                settledCount++;
-            } catch (Exception e) {
-                log.error("Settlement failed for userId={}: {}", result.getUserId(), e.getMessage(), e);
+                } catch (Exception e) {
+                    log.error("Settlement failed for userId={}: {}", result.getUserId(), e.getMessage(), e);
+                    break; // non-retryable error, move to next result
+                }
             }
         }
 
