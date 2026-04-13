@@ -2,6 +2,7 @@ package com.eap.eap_wallet.configuration.config;
 
 import org.springframework.amqp.core.Binding;
 import org.springframework.amqp.core.BindingBuilder;
+import org.springframework.amqp.core.FanoutExchange;
 import org.springframework.amqp.core.Queue;
 import org.springframework.amqp.core.QueueBuilder;
 import org.springframework.amqp.core.TopicExchange;
@@ -29,6 +30,24 @@ public class RabbitMQConfig {
   @Bean
   public MessageConverter jsonMessageConverter() {
     return new Jackson2JsonMessageConverter();
+  }
+
+  // --- Dead Letter Exchange / Queue (shared, idempotent declare) ---
+
+  @Bean
+  public FanoutExchange deadLetterExchange() {
+    return new FanoutExchange(DEAD_LETTER_EXCHANGE);
+  }
+
+  @Bean
+  public Queue deadLetterQueue() {
+    return QueueBuilder.durable(DEAD_LETTER_QUEUE).build();
+  }
+
+  @Bean
+  public Binding dlqBinding(@Qualifier("deadLetterQueue") Queue deadLetterQueue,
+                            FanoutExchange deadLetterExchange) {
+    return BindingBuilder.bind(deadLetterQueue).to(deadLetterExchange);
   }
 
   @Bean
