@@ -1,18 +1,22 @@
 package com.eap.eap_wallet.application;
 
+import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
+import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
 import com.eap.common.event.OrderSubmittedEvent;
-import com.eap.common.event.OrderConfirmedEvent;
-import com.eap.common.event.OrderFailedEvent;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.orm.ObjectOptimisticLockingFailureException;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.TransactionStatus;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 import java.time.LocalDateTime;
 import java.util.UUID;
@@ -28,9 +32,13 @@ class CreateOrderListenerTest {
     private WalletRepository walletRepository;
 
     @Mock
-    private RabbitTemplate rabbitTemplate;
+    private OutboxRepository outboxRepository;
 
-    @InjectMocks
+    @Mock
+    private PlatformTransactionManager transactionManager;
+
+    private ObjectMapper objectMapper;
+
     private CreateOrderListener createOrderListener;
 
     private UUID testUserId;
@@ -42,12 +50,35 @@ class CreateOrderListenerTest {
         testUserId = UUID.randomUUID();
         testOrderId = UUID.randomUUID();
         testCreatedAt = LocalDateTime.now();
+
+        objectMapper = new ObjectMapper();
+        objectMapper.registerModule(new JavaTimeModule());
+
+        // Make TransactionTemplate execute synchronously
+        TransactionStatus txStatus = new SimpleTransactionStatus();
+        when(transactionManager.getTransaction(any())).thenReturn(txStatus);
+
+        createOrderListener = new CreateOrderListener();
+        // Inject dependencies via reflection
+        setField(createOrderListener, "walletRepository", walletRepository);
+        setField(createOrderListener, "outboxRepository", outboxRepository);
+        setField(createOrderListener, "objectMapper", objectMapper);
+        setField(createOrderListener, "transactionManager", transactionManager);
+    }
+
+    private void setField(Object target, String fieldName, Object value) {
+        try {
+            var field = target.getClass().getDeclaredField(fieldName);
+            field.setAccessible(true);
+            field.set(target, value);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
     }
 
     @Test
-    void testOnOrderCreate_WhenWalletHasSufficientBalance_ShouldPublishOrderConfirmedEvent() {
-        // Given
-        OrderSubmittedEvent orderCreateEvent = OrderSubmittedEvent.builder()
+    void testOnOrderCreate_WhenWalletHasSufficientBalance_ShouldWriteOutboxConfirmedEvent() {
+        OrderSubmittedEvent event = OrderSubmittedEvent.builder()
                 .orderId(testOrderId)
                 .userId(testUserId)
                 .price(1000)
@@ -68,30 +99,24 @@ class CreateOrderListenerTest {
 
         when(walletRepository.findByUserId(testUserId)).thenReturn(walletEntity);
 
-        // When
-        createOrderListener.onOrderSubmitted(orderCreateEvent);
+        createOrderListener.onOrderSubmitted(event);
 
-        // Then
-        ArgumentCaptor<OrderConfirmedEvent> eventCaptor = ArgumentCaptor.forClass(OrderConfirmedEvent.class);
-        verify(rabbitTemplate).convertAndSend(eq("order.exchange"), eq("order.confirmed"), eventCaptor.capture());
+        verify(walletRepository).save(walletEntity);
+        assertEquals(1000000000 - 50000, walletEntity.getAvailableCurrency());
+        assertEquals(50000, walletEntity.getLockedCurrency());
 
-        OrderConfirmedEvent capturedEvent = eventCaptor.getValue();
-        assertEquals(testOrderId, capturedEvent.getOrderId());
-        assertEquals(testUserId, capturedEvent.getUserId());
-        assertEquals(1000, capturedEvent.getPrice());
-        assertEquals(50, capturedEvent.getAmount());
-        assertEquals("BUY", capturedEvent.getOrderType());
-        assertEquals(testCreatedAt, capturedEvent.getCreatedAt());
+        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
+        verify(outboxRepository).save(outboxCaptor.capture());
+        assertEquals("OrderConfirmedEvent", outboxCaptor.getValue().getEventType());
     }
 
     @Test
-    void testOnOrderCreate_WhenWalletHasInsufficientBalance_ShouldSendOrderFailedEvent() {
-        // Given
-        OrderSubmittedEvent orderCreateEvent = OrderSubmittedEvent.builder()
+    void testOnOrderCreate_WhenWalletHasInsufficientBalance_ShouldWriteOutboxFailedEvent() {
+        OrderSubmittedEvent event = OrderSubmittedEvent.builder()
                 .orderId(testOrderId)
                 .userId(testUserId)
                 .price(1000)
-                .amount(150) // 超過可用餘額 (150 * 1000 = 150,000 > 1)
+                .amount(150)
                 .orderType("BUY")
                 .createdAt(testCreatedAt)
                 .build();
@@ -100,7 +125,7 @@ class CreateOrderListenerTest {
                 .id(1L)
                 .userId(testUserId)
                 .availableAmount(100)
-                .availableCurrency(1) // 可用貨幣很少，不足以購買
+                .availableCurrency(1)
                 .lockedAmount(0)
                 .lockedCurrency(0)
                 .updateTime(LocalDateTime.now())
@@ -108,36 +133,22 @@ class CreateOrderListenerTest {
 
         when(walletRepository.findByUserId(testUserId)).thenReturn(walletEntity);
 
-        // When
-        createOrderListener.onOrderSubmitted(orderCreateEvent);
+        createOrderListener.onOrderSubmitted(event);
 
-        // Then
-        // 驗證發送了 OrderFailedEvent
-        ArgumentCaptor<OrderFailedEvent> failedEventCaptor = ArgumentCaptor.forClass(OrderFailedEvent.class);
-        verify(rabbitTemplate).convertAndSend(eq("order.exchange"), eq("order.failed"), failedEventCaptor.capture());
+        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
+        verify(outboxRepository).save(outboxCaptor.capture());
+        assertEquals("OrderFailedEvent", outboxCaptor.getValue().getEventType());
 
-        OrderFailedEvent capturedFailedEvent = failedEventCaptor.getValue();
-        assertEquals(testOrderId, capturedFailedEvent.getOrderId());
-        assertEquals(testUserId, capturedFailedEvent.getUserId());
-        assertEquals("餘額不足", capturedFailedEvent.getReason());
-        assertEquals("INSUFFICIENT_BALANCE", capturedFailedEvent.getFailureType());
-        assertNotNull(capturedFailedEvent.getFailedAt());
-
-        // 驗證沒有發送 OrderConfirmedEvent
-        verify(rabbitTemplate, never()).convertAndSend(anyString(), eq("order.confirmed"), any(OrderConfirmedEvent.class));
-        
-        // 驗證沒有保存錢包（因為沒有鎖定資產）
         verify(walletRepository, never()).save(any(WalletEntity.class));
     }
 
     @Test
-    void testOnOrderCreate_WhenWalletHasInsufficientAmountForSell_ShouldSendOrderFailedEvent() {
-        // Given
-        OrderSubmittedEvent orderCreateEvent = OrderSubmittedEvent.builder()
+    void testOnOrderCreate_WhenWalletHasInsufficientAmountForSell_ShouldWriteOutboxFailedEvent() {
+        OrderSubmittedEvent event = OrderSubmittedEvent.builder()
                 .orderId(testOrderId)
                 .userId(testUserId)
                 .price(1000)
-                .amount(150) // 超過可用電量
+                .amount(150)
                 .orderType("SELL")
                 .createdAt(testCreatedAt)
                 .build();
@@ -145,7 +156,7 @@ class CreateOrderListenerTest {
         WalletEntity walletEntity = WalletEntity.builder()
                 .id(1L)
                 .userId(testUserId)
-                .availableAmount(100) // 可用電量不足
+                .availableAmount(100)
                 .availableCurrency(1000000)
                 .lockedAmount(0)
                 .lockedCurrency(0)
@@ -154,27 +165,65 @@ class CreateOrderListenerTest {
 
         when(walletRepository.findByUserId(testUserId)).thenReturn(walletEntity);
 
-        // When
-        createOrderListener.onOrderSubmitted(orderCreateEvent);
+        createOrderListener.onOrderSubmitted(event);
 
-        // Then
-        // 驗證發送了 OrderFailedEvent
-        ArgumentCaptor<OrderFailedEvent> failedEventCaptor = ArgumentCaptor.forClass(OrderFailedEvent.class);
-        verify(rabbitTemplate).convertAndSend(eq("order.exchange"), eq("order.failed"), failedEventCaptor.capture());
+        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
+        verify(outboxRepository).save(outboxCaptor.capture());
+        assertEquals("OrderFailedEvent", outboxCaptor.getValue().getEventType());
 
-        OrderFailedEvent capturedFailedEvent = failedEventCaptor.getValue();
-        assertEquals(testOrderId, capturedFailedEvent.getOrderId());
-        assertEquals(testUserId, capturedFailedEvent.getUserId());
-        assertEquals("可用電量不足", capturedFailedEvent.getReason());
-        assertEquals("INSUFFICIENT_AMOUNT", capturedFailedEvent.getFailureType());
-        assertNotNull(capturedFailedEvent.getFailedAt());
-
-        // 驗證沒有發送 OrderConfirmedEvent
-        verify(rabbitTemplate, never()).convertAndSend(anyString(), eq("order.confirmed"), any(OrderConfirmedEvent.class));
-        
-        // 驗證沒有保存錢包（因為沒有鎖定資產）
         verify(walletRepository, never()).save(any(WalletEntity.class));
     }
 
-  
+    @Test
+    void optimisticLock_firstAttemptFails_secondSucceeds_shouldRetryAndProcess() {
+        OrderSubmittedEvent event = OrderSubmittedEvent.builder()
+                .orderId(testOrderId)
+                .userId(testUserId)
+                .price(100)
+                .amount(10)
+                .orderType("BUY")
+                .createdAt(testCreatedAt)
+                .build();
+
+        WalletEntity wallet = WalletEntity.builder()
+                .id(1L)
+                .userId(testUserId)
+                .availableAmount(100)
+                .availableCurrency(10000)
+                .lockedCurrency(0)
+                .lockedAmount(0)
+                .updateTime(LocalDateTime.now())
+                .build();
+
+        when(walletRepository.findByUserId(testUserId))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenReturn(wallet);
+
+        createOrderListener.onOrderSubmitted(event);
+
+        verify(walletRepository, times(2)).findByUserId(testUserId);
+        verify(walletRepository).save(wallet);
+    }
+
+    @Test
+    void optimisticLock_allThreeAttemptsFail_shouldThrowAfterMaxRetries() {
+        OrderSubmittedEvent event = OrderSubmittedEvent.builder()
+                .orderId(testOrderId)
+                .userId(testUserId)
+                .price(100)
+                .amount(10)
+                .orderType("BUY")
+                .createdAt(testCreatedAt)
+                .build();
+
+        when(walletRepository.findByUserId(testUserId))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
+                .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L));
+
+        assertThrows(ObjectOptimisticLockingFailureException.class,
+                () -> createOrderListener.onOrderSubmitted(event));
+
+        verify(walletRepository, times(3)).findByUserId(testUserId);
+    }
 }

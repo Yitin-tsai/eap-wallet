@@ -20,6 +20,8 @@ spring:
     password: admin123
     listener:
       simple:
+        prefetch: 10
+        default-requeue-rejected: false
         retry:
           enabled: true
           max-attempts: 3
