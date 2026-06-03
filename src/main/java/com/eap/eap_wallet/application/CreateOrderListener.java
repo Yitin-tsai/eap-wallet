@@ -86,6 +86,8 @@ public class CreateOrderListener {
                         OrderConfirmedEvent orderConfirmedEvent = OrderConfirmedEvent.builder()
                                 .orderId(event.getOrderId())
                                 .userId(event.getUserId())
+                                .marketId(event.getMarketId())
+                                .marketSequence(event.getMarketSequence())
                                 .price(event.getPrice())
                                 .amount(event.getAmount())
                                 .orderType(event.getOrderType())
