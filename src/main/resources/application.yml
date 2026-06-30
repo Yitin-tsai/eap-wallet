@@ -18,6 +18,10 @@ spring:
     port: 5672
     username: admin
     password: admin123
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    template:
+      mandatory: true
     listener:
       simple:
         prefetch: 10
@@ -47,7 +51,36 @@ springdoc:
   swagger-ui:
     path: /swagger-ui.html
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics,prometheus
+  endpoint:
+    health:
+      show-details: when_authorized
+  metrics:
+    tags:
+      application: eap-wallet
+
 logging:
   level:
     '[com.eap.eap_order]': DEBUG
-    '[org.springframework.web]': DEBUG
+    '[org.springframework.web]': INFO
+
+eap:
+  wallet:
+    listeners:
+      order-submitted:
+        concurrency: 8
+      order-matched:
+        concurrency: 4
+    outbox-admin:
+      enabled: false
+    outbox-relay:
+      batch-size: 200
+      poll-interval-ms: 500
+      confirm-timeout-ms: 5000
+      max-attempts: 10
+      initial-backoff-ms: 1000
+      max-backoff-ms: 300000

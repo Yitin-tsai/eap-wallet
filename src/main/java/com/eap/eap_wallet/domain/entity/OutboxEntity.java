@@ -33,6 +33,18 @@ public class OutboxEntity {
     @Column(name = "created_at")
     private LocalDateTime createdAt = LocalDateTime.now();
 
+    @Column(name = "attempt_count", nullable = false)
+    private int attemptCount;
+
+    @Column(name = "next_retry_at")
+    private LocalDateTime nextRetryAt = LocalDateTime.now();
+
+    @Column(name = "last_error", length = 1000)
+    private String lastError;
+
+    @Column(name = "updated_at", nullable = false)
+    private LocalDateTime updatedAt = LocalDateTime.now();
+
     public OutboxEntity(String eventType, String routingKey, String payload) {
         this.eventType = eventType;
         this.routingKey = routingKey;

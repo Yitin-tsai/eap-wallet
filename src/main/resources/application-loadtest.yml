@@ -1,0 +1,29 @@
+spring:
+  datasource:
+    hikari:
+      maximum-pool-size: 40
+      minimum-idle: 12
+  rabbitmq:
+    listener:
+      simple:
+        concurrency: 4
+        max-concurrency: 32
+        prefetch: 20
+
+eap:
+  wallet:
+    listeners:
+      order-submitted:
+        concurrency: 32
+      order-matched:
+        concurrency: 16
+    outbox-relay:
+      batch-size: 500
+      poll-interval-ms: 100
+
+logging:
+  level:
+    '[com.eap.eap_wallet.application.CreateOrderListener]': WARN
+    '[com.eap.eap_wallet.application.MatchedOrderListener]': WARN
+    '[com.eap.eap_wallet.controller.WalletController]': WARN
+    '[org.springframework.amqp.rabbit.listener]': WARN

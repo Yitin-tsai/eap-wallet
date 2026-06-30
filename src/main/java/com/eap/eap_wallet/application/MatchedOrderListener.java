@@ -23,7 +23,9 @@ public class MatchedOrderListener {
     @Autowired
     PlatformTransactionManager transactionManager;
 
-    @RabbitListener(queues = WALLET_ORDER_MATCHED_QUEUE)
+    @RabbitListener(
+            queues = WALLET_ORDER_MATCHED_QUEUE,
+            concurrency = "${eap.wallet.listeners.order-matched.concurrency:4}")
     public void handleOrderMatched(OrderMatchedEvent event) {
         log.info("收到 OrderMatchedEvent: matchId={}, 買方={}, 賣方={}, 成交價={}, 數量={}",
                  event.getMatchId(), event.getBuyerId(), event.getSellerId(),

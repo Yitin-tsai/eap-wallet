@@ -1,6 +1,11 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
+import com.eap.eap_wallet.configuration.repository.OrderSubmissionIdempotencyRepository;
+import com.eap.eap_wallet.configuration.repository.OutboxRepository;
+import com.eap.eap_wallet.configuration.observability.WalletMetrics;
+import com.eap.eap_wallet.domain.entity.OrderSubmissionIdempotencyEntity;
+import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
 import com.eap.common.event.OrderSubmittedEvent;
 import java.time.LocalDateTime;
@@ -17,6 +22,8 @@ import org.springframework.context.annotation.Primary;
 import org.springframework.integration.channel.QueueChannel;
 import org.springframework.messaging.PollableChannel;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.SimpleTransactionStatus;
 
 @SpringBootTest(classes = {CreateOrderListener.class, BaseContractTest.TestConfiguration.class})
 @AutoConfigureMessageVerifier
@@ -44,6 +51,14 @@ public class BaseContractTest {
 
   @MockitoBean private WalletRepository walletRepository;
 
+  @MockitoBean private OrderSubmissionIdempotencyRepository orderSubmissionIdempotencyRepository;
+
+  @MockitoBean private OutboxRepository outboxRepository;
+
+  @MockitoBean private PlatformTransactionManager transactionManager;
+
+  @MockitoBean private WalletMetrics walletMetrics;
+
   @MockitoBean private RabbitTemplate rabbitTemplate;
 
   @Autowired private PollableChannel orderExchange;
@@ -64,26 +79,27 @@ public class BaseContractTest {
 
     // 如果 findByUserId 參數是 UUID，使用 UUID；如果是 String，使用 String
     Mockito.when(walletRepository.findByUserId(testUserId)).thenReturn(wallet);
+    Mockito.when(orderSubmissionIdempotencyRepository.saveAndFlush(Mockito.any()))
+        .thenAnswer(invocation -> invocation.getArgument(0, OrderSubmissionIdempotencyEntity.class));
+    Mockito.when(transactionManager.getTransaction(Mockito.any())).thenReturn(new SimpleTransactionStatus());
 
-    // 捕獲 RabbitTemplate 的發送操作並轉發到測試 channel
+    // CreateOrderListener writes to outbox; bridge saved events to the contract channel.
     Mockito.doAnswer(
             invocation -> {
-              String exchange = invocation.getArgument(0);
-              String routingKey = invocation.getArgument(1);
-              Object message = invocation.getArgument(2);
-
-              if ("order.exchange".equals(exchange)) {
-                org.springframework.messaging.Message<?> msg =
-                    org.springframework.messaging.support.MessageBuilder.withPayload(message)
-                        .setHeader("rabbitmq_routingKey", routingKey)
-                        .build();
-                orderExchange.send(msg);
-              }
-              return null;
+              OutboxEntity outbox = invocation.getArgument(0);
+              Object payload =
+                  new com.fasterxml.jackson.databind.ObjectMapper()
+                      .registerModule(new com.fasterxml.jackson.datatype.jsr310.JavaTimeModule())
+                      .readValue(outbox.getPayload(), Object.class);
+              org.springframework.messaging.Message<?> msg =
+                  org.springframework.messaging.support.MessageBuilder.withPayload(payload)
+                      .setHeader("rabbitmq_routingKey", outbox.getRoutingKey())
+                      .build();
+              orderExchange.send(msg);
+              return outbox;
             })
-        .when(rabbitTemplate)
-        .convertAndSend(
-            Mockito.any(String.class), Mockito.any(String.class), Mockito.any(Object.class));
+        .when(outboxRepository)
+        .save(Mockito.any(OutboxEntity.class));
   }
 
   public void processOrderCreate() { // 改名符合 contract 中的 triggeredBy

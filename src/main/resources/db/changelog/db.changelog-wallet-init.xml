@@ -140,4 +140,44 @@
             columnNames="auction_id, user_id, side" constraintName="uk_settlement_idempotency"/>
     </changeSet>
 
+    <changeSet id="wallet-012" author="eap">
+        <comment>order_submission_idempotency table for CreateOrderListener duplicate protection</comment>
+        <createTable tableName="order_submission_idempotency" schemaName="wallet_service">
+            <column name="id" type="BIGSERIAL">
+                <constraints primaryKey="true" nullable="false"/>
+            </column>
+            <column name="order_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="user_id" type="UUID">
+                <constraints nullable="false"/>
+            </column>
+            <column name="recorded_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </createTable>
+        <addUniqueConstraint tableName="order_submission_idempotency" schemaName="wallet_service"
+            columnNames="order_id" constraintName="uk_order_submission_idempotency"/>
+    </changeSet>
+
+    <changeSet id="wallet-013" author="eap">
+        <comment>Add persistent retry lifecycle fields to wallet outbox</comment>
+        <addColumn tableName="outbox" schemaName="wallet_service">
+            <column name="attempt_count" type="INT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="next_retry_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP"/>
+            <column name="last_error" type="VARCHAR(1000)"/>
+            <column name="updated_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <dropIndex indexName="idx_outbox_status" tableName="outbox" schemaName="wallet_service"/>
+        <sql>
+            CREATE INDEX idx_outbox_pending_retry
+            ON wallet_service.outbox(next_retry_at, created_at)
+            WHERE status = 'PENDING';
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>

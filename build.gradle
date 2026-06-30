@@ -31,10 +31,12 @@ dependencyManagement {
 dependencies {
     implementation 'com.eap:eap-common:1.0.0'
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
     implementation 'org.springframework.boot:spring-boot-starter-amqp'
     implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
     implementation 'org.postgresql:postgresql'
     implementation 'org.liquibase:liquibase-core'
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
     implementation 'org.springdoc:springdoc-openapi-starter-webmvc-ui:2.8.6'
 
     compileOnly "org.projectlombok:lombok"
@@ -57,4 +59,28 @@ tasks.named("generateContractTests") {
 
 tasks.named('test') {
     useJUnitPlatform()
+}
+
+tasks.register('walletAmqpLoadTest', JavaExec) {
+    group = 'verification'
+    description = 'Publish OrderSubmittedEvent load directly through RabbitMQ AMQP for wallet throughput testing.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.eap.eap_wallet.loadtest.WalletAmqpLoadGenerator'
+}
+
+tasks.register('walletMatchedDbLoadTest', JavaExec) {
+    group = 'verification'
+    description = 'Seed buyer/seller wallets and benchmark OrderMatchedEvent settlement DB write path.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.eap.eap_wallet.loadtest.WalletMatchedDbLoadGenerator'
+    systemProperty 'spring.profiles.active', 'loadtest'
+    systemProperty 'spring.rabbitmq.listener.simple.auto-startup', 'false'
+    systemProperty 'spring.datasource.url', 'jdbc:postgresql://localhost:5432/eapdb'
+    systemProperty 'spring.datasource.username', 'admin'
+    systemProperty 'spring.datasource.password', 'admin123'
+    systemProperty 'spring.datasource.driver-class-name', 'org.postgresql.Driver'
+    systemProperty 'spring.jpa.hibernate.ddl-auto', 'validate'
+    systemProperty 'spring.liquibase.enabled', 'true'
+    systemProperty 'spring.liquibase.change-log', 'classpath:db/changelog/db.changelog-master.xml'
+    systemProperty 'eap.wallet.outbox-relay.enabled', 'false'
 }

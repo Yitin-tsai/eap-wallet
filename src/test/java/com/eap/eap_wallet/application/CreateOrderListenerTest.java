@@ -1,7 +1,9 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
+import com.eap.eap_wallet.configuration.repository.OrderSubmissionIdempotencyRepository;
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
+import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
 import com.eap.common.event.OrderSubmittedEvent;
@@ -10,6 +12,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
@@ -35,7 +38,13 @@ class CreateOrderListenerTest {
     private OutboxRepository outboxRepository;
 
     @Mock
+    private OrderSubmissionIdempotencyRepository orderSubmissionIdempotencyRepository;
+
+    @Mock
     private PlatformTransactionManager transactionManager;
+
+    @Mock
+    private WalletMetrics walletMetrics;
 
     private ObjectMapper objectMapper;
 
@@ -62,8 +71,10 @@ class CreateOrderListenerTest {
         // Inject dependencies via reflection
         setField(createOrderListener, "walletRepository", walletRepository);
         setField(createOrderListener, "outboxRepository", outboxRepository);
+        setField(createOrderListener, "orderSubmissionIdempotencyRepository", orderSubmissionIdempotencyRepository);
         setField(createOrderListener, "objectMapper", objectMapper);
         setField(createOrderListener, "transactionManager", transactionManager);
+        setField(createOrderListener, "walletMetrics", walletMetrics);
     }
 
     private void setField(Object target, String fieldName, Object value) {
@@ -87,27 +98,46 @@ class CreateOrderListenerTest {
                 .createdAt(testCreatedAt)
                 .build();
 
-        WalletEntity walletEntity = WalletEntity.builder()
-                .id(1L)
-                .userId(testUserId)
-                .availableAmount(100)
-                .availableCurrency(1000000000)
-                .lockedCurrency(0)
-                .lockedAmount(0)
-                .updateTime(LocalDateTime.now())
-                .build();
-
-        when(walletRepository.findByUserId(testUserId)).thenReturn(walletEntity);
+        when(orderSubmissionIdempotencyRepository.claimOrderSubmission(testOrderId, testUserId)).thenReturn(1);
+        when(walletRepository.reserveCurrencyForBuy(testUserId, 50000)).thenReturn(1);
 
         createOrderListener.onOrderSubmitted(event);
 
-        verify(walletRepository).save(walletEntity);
-        assertEquals(1000000000 - 50000, walletEntity.getAvailableCurrency());
-        assertEquals(50000, walletEntity.getLockedCurrency());
+        verify(walletRepository).reserveCurrencyForBuy(testUserId, 50000);
+        verify(walletRepository, never()).findByUserId(testUserId);
+        verify(walletRepository, never()).save(any(WalletEntity.class));
 
         ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
         verify(outboxRepository).save(outboxCaptor.capture());
         assertEquals("OrderConfirmedEvent", outboxCaptor.getValue().getEventType());
+    }
+
+    @Test
+    void duplicateOrderSubmittedEvent_shouldLockAssetOnlyOnce() {
+        OrderSubmittedEvent event = OrderSubmittedEvent.builder()
+                .orderId(testOrderId)
+                .userId(testUserId)
+                .price(1000)
+                .amount(10)
+                .orderType("BUY")
+                .createdAt(testCreatedAt)
+                .build();
+
+        when(orderSubmissionIdempotencyRepository.claimOrderSubmission(testOrderId, testUserId))
+                .thenReturn(1)
+                .thenReturn(0);
+        when(walletRepository.reserveCurrencyForBuy(testUserId, 10000)).thenReturn(1);
+
+        createOrderListener.onOrderSubmitted(event);
+        createOrderListener.onOrderSubmitted(event);
+
+        verify(walletRepository, never()).findByUserId(testUserId);
+        verify(walletRepository, times(1)).reserveCurrencyForBuy(testUserId, 10000);
+        verify(walletRepository, never()).save(any(WalletEntity.class));
+        verify(outboxRepository, times(1)).save(any(OutboxEntity.class));
+        verify(orderSubmissionIdempotencyRepository, times(2))
+                .claimOrderSubmission(testOrderId, testUserId);
+
     }
 
     @Test
@@ -121,17 +151,9 @@ class CreateOrderListenerTest {
                 .createdAt(testCreatedAt)
                 .build();
 
-        WalletEntity walletEntity = WalletEntity.builder()
-                .id(1L)
-                .userId(testUserId)
-                .availableAmount(100)
-                .availableCurrency(1)
-                .lockedAmount(0)
-                .lockedCurrency(0)
-                .updateTime(LocalDateTime.now())
-                .build();
-
-        when(walletRepository.findByUserId(testUserId)).thenReturn(walletEntity);
+        when(orderSubmissionIdempotencyRepository.claimOrderSubmission(testOrderId, testUserId)).thenReturn(1);
+        when(walletRepository.reserveCurrencyForBuy(testUserId, 150000)).thenReturn(0);
+        when(walletRepository.existsByUserId(testUserId)).thenReturn(true);
 
         createOrderListener.onOrderSubmitted(event);
 
@@ -139,6 +161,7 @@ class CreateOrderListenerTest {
         verify(outboxRepository).save(outboxCaptor.capture());
         assertEquals("OrderFailedEvent", outboxCaptor.getValue().getEventType());
 
+        verify(walletRepository).reserveCurrencyForBuy(testUserId, 150000);
         verify(walletRepository, never()).save(any(WalletEntity.class));
     }
 
@@ -153,17 +176,9 @@ class CreateOrderListenerTest {
                 .createdAt(testCreatedAt)
                 .build();
 
-        WalletEntity walletEntity = WalletEntity.builder()
-                .id(1L)
-                .userId(testUserId)
-                .availableAmount(100)
-                .availableCurrency(1000000)
-                .lockedAmount(0)
-                .lockedCurrency(0)
-                .updateTime(LocalDateTime.now())
-                .build();
-
-        when(walletRepository.findByUserId(testUserId)).thenReturn(walletEntity);
+        when(orderSubmissionIdempotencyRepository.claimOrderSubmission(testOrderId, testUserId)).thenReturn(1);
+        when(walletRepository.reserveAmountForSell(testUserId, 150)).thenReturn(0);
+        when(walletRepository.existsByUserId(testUserId)).thenReturn(true);
 
         createOrderListener.onOrderSubmitted(event);
 
@@ -171,6 +186,7 @@ class CreateOrderListenerTest {
         verify(outboxRepository).save(outboxCaptor.capture());
         assertEquals("OrderFailedEvent", outboxCaptor.getValue().getEventType());
 
+        verify(walletRepository).reserveAmountForSell(testUserId, 150);
         verify(walletRepository, never()).save(any(WalletEntity.class));
     }
 
@@ -185,24 +201,16 @@ class CreateOrderListenerTest {
                 .createdAt(testCreatedAt)
                 .build();
 
-        WalletEntity wallet = WalletEntity.builder()
-                .id(1L)
-                .userId(testUserId)
-                .availableAmount(100)
-                .availableCurrency(10000)
-                .lockedCurrency(0)
-                .lockedAmount(0)
-                .updateTime(LocalDateTime.now())
-                .build();
-
-        when(walletRepository.findByUserId(testUserId))
+        when(orderSubmissionIdempotencyRepository.claimOrderSubmission(testOrderId, testUserId)).thenReturn(1);
+        when(walletRepository.reserveCurrencyForBuy(testUserId, 1000))
                 .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
-                .thenReturn(wallet);
+                .thenReturn(1);
 
         createOrderListener.onOrderSubmitted(event);
 
-        verify(walletRepository, times(2)).findByUserId(testUserId);
-        verify(walletRepository).save(wallet);
+        verify(orderSubmissionIdempotencyRepository, times(2)).claimOrderSubmission(testOrderId, testUserId);
+        verify(walletRepository, times(2)).reserveCurrencyForBuy(testUserId, 1000);
+        verify(walletRepository, never()).save(any(WalletEntity.class));
     }
 
     @Test
@@ -216,7 +224,8 @@ class CreateOrderListenerTest {
                 .createdAt(testCreatedAt)
                 .build();
 
-        when(walletRepository.findByUserId(testUserId))
+        when(orderSubmissionIdempotencyRepository.claimOrderSubmission(testOrderId, testUserId)).thenReturn(1);
+        when(walletRepository.reserveCurrencyForBuy(testUserId, 1000))
                 .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
                 .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L))
                 .thenThrow(new ObjectOptimisticLockingFailureException("WalletEntity", 1L));
@@ -224,6 +233,7 @@ class CreateOrderListenerTest {
         assertThrows(ObjectOptimisticLockingFailureException.class,
                 () -> createOrderListener.onOrderSubmitted(event));
 
-        verify(walletRepository, times(3)).findByUserId(testUserId);
+        verify(orderSubmissionIdempotencyRepository, times(3)).claimOrderSubmission(testOrderId, testUserId);
+        verify(walletRepository, times(3)).reserveCurrencyForBuy(testUserId, 1000);
     }
 }
