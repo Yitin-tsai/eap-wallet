@@ -4,6 +4,7 @@ import com.eap.common.constants.RabbitMQConstants;
 import com.eap.common.event.AuctionBidConfirmedEvent;
 import com.eap.common.event.OrderConfirmedEvent;
 import com.eap.common.event.OrderFailedEvent;
+import com.eap.common.event.WalletTradeSettledEvent;
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import com.eap.eap_wallet.domain.entity.OutboxEntity;
@@ -221,6 +222,7 @@ public class OutboxPoller {
             case "OrderConfirmedEvent" -> objectMapper.readValue(entry.getPayload(), OrderConfirmedEvent.class);
             case "OrderFailedEvent" -> objectMapper.readValue(entry.getPayload(), OrderFailedEvent.class);
             case "AuctionBidConfirmedEvent" -> objectMapper.readValue(entry.getPayload(), AuctionBidConfirmedEvent.class);
+            case "WalletTradeSettledEvent" -> objectMapper.readValue(entry.getPayload(), WalletTradeSettledEvent.class);
             default -> throw new IllegalArgumentException("Unknown event type: " + entry.getEventType());
         };
     }
@@ -228,6 +230,7 @@ public class OutboxPoller {
     private String resolveExchange(String eventType) {
         return switch (eventType) {
             case "AuctionBidConfirmedEvent" -> RabbitMQConstants.AUCTION_EXCHANGE;
+            case "WalletTradeSettledEvent" -> RabbitMQConstants.TRADE_EXCHANGE;
             default -> RabbitMQConstants.ORDER_EXCHANGE;
         };
     }

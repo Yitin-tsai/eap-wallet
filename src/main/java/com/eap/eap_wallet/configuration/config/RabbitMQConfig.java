@@ -55,6 +55,11 @@ public class RabbitMQConfig {
     return new TopicExchange(ORDER_EXCHANGE);
   }
 
+  @Bean
+  public TopicExchange tradeExchange() {
+    return new TopicExchange(TRADE_EXCHANGE);
+  }
+
   // Wallet-specific queue for order submission validation
   @Bean
   public Queue walletOrderSubmittedQueue() {
@@ -72,15 +77,29 @@ public class RabbitMQConfig {
   }
 
   @Bean
+  public Queue walletTradeExecutedQueue() {
+    return QueueBuilder.durable(WALLET_TRADE_EXECUTED_QUEUE)
+        .withArgument("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE)
+        .build();
+  }
+
+  @Bean
   public Binding walletOrderSubmittedBinding(@Qualifier("walletOrderSubmittedQueue") Queue walletOrderSubmittedQueue,
-      TopicExchange orderExchange) {
+      @Qualifier("orderExchange") TopicExchange orderExchange) {
     return BindingBuilder.bind(walletOrderSubmittedQueue).to(orderExchange).with(ORDER_SUBMITTED_KEY);
   }
 
   @Bean
   public Binding walletOrderMatchedBinding(@Qualifier("walletOrderMatchedQueue") Queue walletOrderMatchedQueue,
-      TopicExchange orderExchange) {
+      @Qualifier("orderExchange") TopicExchange orderExchange) {
     return BindingBuilder.bind(walletOrderMatchedQueue).to(orderExchange).with(ORDER_MATCHED_KEY);
+  }
+
+  @Bean
+  public Binding walletTradeExecutedBinding(
+      @Qualifier("walletTradeExecutedQueue") Queue walletTradeExecutedQueue,
+      @Qualifier("tradeExchange") TopicExchange tradeExchange) {
+    return BindingBuilder.bind(walletTradeExecutedQueue).to(tradeExchange).with(TRADE_EXECUTED_KEY);
   }
 
   // === Auction Exchange & Queues ===
