@@ -1,5 +1,8 @@
 spring:
   datasource:
+    url: jdbc:postgresql://localhost:15433/eap_wallet_db
+    username: admin
+    password: admin123
     hikari:
       maximum-pool-size: 40
       minimum-idle: 12
@@ -17,6 +20,8 @@ eap:
         concurrency: 32
       order-matched:
         concurrency: 16
+      trade-executed:
+        concurrency: 12
     outbox-relay:
       batch-size: 500
       poll-interval-ms: 100

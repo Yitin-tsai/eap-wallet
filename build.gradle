@@ -75,7 +75,7 @@ tasks.register('walletMatchedDbLoadTest', JavaExec) {
     mainClass = 'com.eap.eap_wallet.loadtest.WalletMatchedDbLoadGenerator'
     systemProperty 'spring.profiles.active', 'loadtest'
     systemProperty 'spring.rabbitmq.listener.simple.auto-startup', 'false'
-    systemProperty 'spring.datasource.url', 'jdbc:postgresql://localhost:5432/eapdb'
+    systemProperty 'spring.datasource.url', 'jdbc:postgresql://localhost:15433/eap_wallet_db'
     systemProperty 'spring.datasource.username', 'admin'
     systemProperty 'spring.datasource.password', 'admin123'
     systemProperty 'spring.datasource.driver-class-name', 'org.postgresql.Driver'
