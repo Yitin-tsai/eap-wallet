@@ -26,6 +26,16 @@ public class WalletMetrics {
     private final Counter outboxRetryScheduledCounter;
     private final Counter outboxRequeuedCounter;
     private final Timer outboxPublishTimer;
+    private final Timer outboxSelectTimer;
+    private final Timer outboxMarkSentTimer;
+    private final Counter tradeSettlementConsumedCounter;
+    private final Counter tradeSettlementCompletedCounter;
+    private final Counter tradeSettlementDuplicateSkippedCounter;
+    private final Counter tradeSettlementFailedCounter;
+    private final Timer tradeSettlementProcessingTimer;
+    private final Timer tradeSettlementSerializationTimer;
+    private final Timer tradeSettlementTransactionTimer;
+    private final Timer tradeSettlementCteTimer;
 
     public WalletMetrics(MeterRegistry registry, OutboxRepository outboxRepository) {
         this.orderSubmittedConsumedCounter = Counter.builder("eap_wallet_order_submitted_consumed_total")
@@ -89,6 +99,42 @@ public class WalletMetrics {
                 .description("Time spent publishing and confirming a wallet outbox record")
                 .publishPercentileHistogram()
                 .register(registry);
+        this.outboxSelectTimer = stageTimer(
+                registry,
+                "eap_wallet_outbox_select_duration",
+                "Time spent selecting pending wallet outbox records");
+        this.outboxMarkSentTimer = stageTimer(
+                registry,
+                "eap_wallet_outbox_mark_sent_duration",
+                "Time spent marking confirmed wallet outbox records as SENT");
+        this.tradeSettlementConsumedCounter = Counter.builder("eap_wallet_trade_settlement_consumed_total")
+                .description("Total TradeExecutedEvent messages consumed by wallet settlement")
+                .register(registry);
+        this.tradeSettlementCompletedCounter = Counter.builder("eap_wallet_trade_settlement_completed_total")
+                .description("Total wallet trade settlements completed")
+                .register(registry);
+        this.tradeSettlementDuplicateSkippedCounter = Counter.builder("eap_wallet_trade_settlement_duplicate_skipped_total")
+                .description("Total duplicate wallet trade settlements skipped")
+                .register(registry);
+        this.tradeSettlementFailedCounter = Counter.builder("eap_wallet_trade_settlement_failed_total")
+                .description("Total wallet trade settlement failures")
+                .register(registry);
+        this.tradeSettlementProcessingTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_processing_duration",
+                "Time spent processing TradeExecutedEvent in wallet service");
+        this.tradeSettlementSerializationTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_serialization_duration",
+                "Time spent serializing WalletTradeSettledEvent payload");
+        this.tradeSettlementTransactionTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_transaction_duration",
+                "Time spent executing and committing wallet trade settlement transaction");
+        this.tradeSettlementCteTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_cte_duration",
+                "Time spent executing wallet trade settlement SQL CTE");
     }
 
     public void orderSubmittedConsumed() {
@@ -141,6 +187,46 @@ public class WalletMetrics {
 
     public void recordOutboxPublish(Duration duration) {
         outboxPublishTimer.record(duration);
+    }
+
+    public void recordOutboxSelect(Duration duration) {
+        outboxSelectTimer.record(duration);
+    }
+
+    public void recordOutboxMarkSent(Duration duration) {
+        outboxMarkSentTimer.record(duration);
+    }
+
+    public void tradeSettlementConsumed() {
+        tradeSettlementConsumedCounter.increment();
+    }
+
+    public void tradeSettlementCompleted() {
+        tradeSettlementCompletedCounter.increment();
+    }
+
+    public void tradeSettlementDuplicateSkipped() {
+        tradeSettlementDuplicateSkippedCounter.increment();
+    }
+
+    public void tradeSettlementFailed() {
+        tradeSettlementFailedCounter.increment();
+    }
+
+    public void recordTradeSettlementProcessing(Duration duration) {
+        tradeSettlementProcessingTimer.record(duration);
+    }
+
+    public void recordTradeSettlementSerialization(Duration duration) {
+        tradeSettlementSerializationTimer.record(duration);
+    }
+
+    public void recordTradeSettlementTransaction(Duration duration) {
+        tradeSettlementTransactionTimer.record(duration);
+    }
+
+    public void recordTradeSettlementCte(Duration duration) {
+        tradeSettlementCteTimer.record(duration);
     }
 
     private Timer stageTimer(MeterRegistry registry, String name, String description) {

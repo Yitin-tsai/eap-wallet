@@ -68,11 +68,17 @@ public class OutboxPoller {
     public void pollAndPublish() {
         boolean continueDraining;
         do {
-            List<OutboxEntity> pending = outboxRepository.findByStatusAndNextRetryAtLessThanEqualOrderByCreatedAtAsc(
-                    "PENDING",
-                    LocalDateTime.now(),
-                    PageRequest.of(0, batchSize)
-            );
+            Instant selectStartedAt = Instant.now();
+            List<OutboxEntity> pending;
+            try {
+                pending = outboxRepository.findByStatusAndNextRetryAtLessThanEqualOrderByCreatedAtAsc(
+                        "PENDING",
+                        LocalDateTime.now(),
+                        PageRequest.of(0, batchSize)
+                );
+            } finally {
+                walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
+            }
             boolean batchSucceeded = true;
             List<PublishAttempt> attempts = new ArrayList<>(pending.size());
 
@@ -164,7 +170,13 @@ public class OutboxPoller {
                 .map(attempt -> attempt.entry().getId())
                 .toList();
         LocalDateTime updatedAt = LocalDateTime.now();
-        int marked = outboxRepository.markPendingAsSent(ids, updatedAt);
+        Instant markStartedAt = Instant.now();
+        int marked;
+        try {
+            marked = outboxRepository.markPendingAsSent(ids, updatedAt);
+        } finally {
+            walletMetrics.recordOutboxMarkSent(Duration.between(markStartedAt, Instant.now()));
+        }
         if (marked != ids.size()) {
             throw new IllegalStateException(
                     "Expected to mark " + ids.size() + " outbox records SENT, but updated " + marked);
