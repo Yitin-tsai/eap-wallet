@@ -7,7 +7,6 @@ import com.eap.common.event.OrderFailedEvent;
 import com.eap.common.event.WalletTradeSettledEvent;
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
-import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpException;
@@ -15,18 +14,25 @@ import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.data.domain.PageRequest;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
+import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.annotation.PreDestroy;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Component
 @Slf4j
@@ -34,10 +40,14 @@ import java.util.concurrent.TimeUnit;
 public class OutboxPoller {
 
     private final OutboxRepository outboxRepository;
+    private final JdbcTemplate jdbcTemplate;
+    private final NamedParameterJdbcTemplate namedJdbcTemplate;
     private final RabbitTemplate rabbitTemplate;
     private final ObjectMapper objectMapper;
     private final WalletMetrics walletMetrics;
     private final int batchSize;
+    private final int publishConcurrency;
+    private final ExecutorService publishExecutor;
     private final long confirmTimeoutMs;
     private final int maxAttempts;
     private final long initialBackoffMs;
@@ -45,61 +55,82 @@ public class OutboxPoller {
 
     public OutboxPoller(
             OutboxRepository outboxRepository,
+            JdbcTemplate jdbcTemplate,
+            NamedParameterJdbcTemplate namedJdbcTemplate,
             RabbitTemplate rabbitTemplate,
             ObjectMapper objectMapper,
             WalletMetrics walletMetrics,
             @Value("${eap.wallet.outbox-relay.batch-size:200}") int batchSize,
+            @Value("${eap.wallet.outbox-relay.publish-concurrency:1}") int publishConcurrency,
             @Value("${eap.wallet.outbox-relay.confirm-timeout-ms:5000}") long confirmTimeoutMs,
             @Value("${eap.wallet.outbox-relay.max-attempts:10}") int maxAttempts,
             @Value("${eap.wallet.outbox-relay.initial-backoff-ms:1000}") long initialBackoffMs,
             @Value("${eap.wallet.outbox-relay.max-backoff-ms:300000}") long maxBackoffMs) {
         this.outboxRepository = outboxRepository;
+        this.jdbcTemplate = jdbcTemplate;
+        this.namedJdbcTemplate = namedJdbcTemplate;
         this.rabbitTemplate = rabbitTemplate;
         this.objectMapper = objectMapper;
         this.walletMetrics = walletMetrics;
         this.batchSize = batchSize;
+        this.publishConcurrency = Math.max(1, publishConcurrency);
+        this.publishExecutor = this.publishConcurrency > 1
+                ? Executors.newFixedThreadPool(this.publishConcurrency, new WalletOutboxPublishThreadFactory())
+                : null;
         this.confirmTimeoutMs = confirmTimeoutMs;
         this.maxAttempts = maxAttempts;
         this.initialBackoffMs = initialBackoffMs;
         this.maxBackoffMs = maxBackoffMs;
     }
 
+    @PreDestroy
+    public void shutdown() {
+        if (publishExecutor != null) {
+            publishExecutor.shutdown();
+        }
+    }
+
     @Scheduled(fixedDelayString = "${eap.wallet.outbox-relay.poll-interval-ms:500}")
     public void pollAndPublish() {
         boolean continueDraining;
         do {
+            Instant batchStartedAt = Instant.now();
             Instant selectStartedAt = Instant.now();
-            List<OutboxEntity> pending;
+            List<OutboxRow> pending;
             try {
-                pending = outboxRepository.findByStatusAndNextRetryAtLessThanEqualOrderByCreatedAtAsc(
-                        "PENDING",
-                        LocalDateTime.now(),
-                        PageRequest.of(0, batchSize)
-                );
+                pending = jdbcTemplate.query("""
+                                SELECT id, event_type, routing_key, payload, attempt_count
+                                FROM wallet_service.outbox
+                                WHERE status = 'PENDING'
+                                  AND next_retry_at <= CURRENT_TIMESTAMP
+                                ORDER BY created_at, id
+                                LIMIT ?
+                                """,
+                        (rs, rowNum) -> new OutboxRow(
+                                rs.getLong("id"),
+                                rs.getString("event_type"),
+                                rs.getString("routing_key"),
+                                rs.getString("payload"),
+                                rs.getInt("attempt_count")),
+                        batchSize);
             } finally {
                 walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
+            }
+            if (pending.isEmpty()) {
+                return;
             }
             boolean batchSucceeded = true;
             List<PublishAttempt> attempts = new ArrayList<>(pending.size());
 
-            for (OutboxEntity entry : pending) {
-                Instant startedAt = Instant.now();
-                try {
-                    Object event = deserializeEvent(entry);
-                    String exchange = resolveExchange(entry.getEventType());
-                    CorrelationData correlationData = new CorrelationData(entry.getId().toString());
-                    rabbitTemplate.convertAndSend(
-                            exchange,
-                            entry.getRoutingKey(),
-                            event,
-                            correlationData
-                    );
-                    attempts.add(new PublishAttempt(entry, correlationData, startedAt));
-                } catch (Exception e) {
+            List<PublishResult> publishResults = publishBatch(pending);
+            for (PublishResult result : publishResults) {
+                if (result.succeeded()) {
+                    attempts.add(new PublishAttempt(result.entry(), result.correlationData(), result.startedAt()));
+                } else {
                     batchSucceeded = false;
                     walletMetrics.outboxPublishFailed();
-                    recordFailure(entry, e);
-                    walletMetrics.recordOutboxPublish(Duration.between(startedAt, Instant.now()));
+                    recordFailure(result.entry(), result.failure());
+                    walletMetrics.recordOutboxPublish(Duration.between(result.startedAt(), Instant.now()));
                 }
             }
 
@@ -107,20 +138,23 @@ public class OutboxPoller {
                     + TimeUnit.MILLISECONDS.toNanos(confirmTimeoutMs);
             List<PublishAttempt> confirmedAttempts = new ArrayList<>(attempts.size());
             for (PublishAttempt attempt : attempts) {
-                OutboxEntity entry = attempt.entry();
+                OutboxRow entry = attempt.entry();
+                Instant confirmStartedAt = Instant.now();
                 try {
                     awaitBrokerConfirmation(entry, attempt.correlationData(), confirmationDeadlineNanos);
                     confirmedAttempts.add(attempt);
                 } catch (InterruptedException e) {
                     Thread.currentThread().interrupt();
                     walletMetrics.outboxPublishFailed();
-                    log.warn("Outbox relay interrupted while waiting for broker confirmation: id={}", entry.getId());
+                    log.warn("Outbox relay interrupted while waiting for broker confirmation: id={}", entry.id());
                     return;
                 } catch (Exception e) {
                     batchSucceeded = false;
                     walletMetrics.outboxPublishFailed();
                     recordFailure(entry, e);
                     walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), Instant.now()));
+                } finally {
+                    walletMetrics.recordOutboxConfirm(Duration.between(confirmStartedAt, Instant.now()));
                 }
             }
 
@@ -138,42 +172,110 @@ public class OutboxPoller {
                 }
             }
             continueDraining = batchSucceeded && pending.size() == batchSize;
+            walletMetrics.recordOutboxBatch(Duration.between(batchStartedAt, Instant.now()));
         } while (continueDraining);
     }
 
-    private void recordFailure(OutboxEntity entry, Exception failure) {
-        int attemptCount = entry.getAttemptCount() + 1;
+    private List<PublishResult> publishBatch(List<OutboxRow> pending) {
+        if (publishConcurrency == 1 || pending.size() <= 1) {
+            List<PublishResult> results = new ArrayList<>(pending.size());
+            for (OutboxRow entry : pending) {
+                results.add(publishOne(entry));
+            }
+            return results;
+        }
+
+        List<CompletableFuture<PublishResult>> futures = pending.stream()
+                .map(entry -> CompletableFuture.supplyAsync(() -> publishOne(entry), publishExecutor))
+                .toList();
+        return futures.stream()
+                .map(CompletableFuture::join)
+                .toList();
+    }
+
+    private PublishResult publishOne(OutboxRow entry) {
+        Instant startedAt = Instant.now();
+        Instant enqueueStartedAt = Instant.now();
+        try {
+            Object event = deserializeEvent(entry);
+            String exchange = resolveExchange(entry.eventType());
+            CorrelationData correlationData = new CorrelationData(Long.toString(entry.id()));
+            rabbitTemplate.convertAndSend(exchange, entry.routingKey(), event, correlationData);
+            return PublishResult.success(entry, correlationData, startedAt);
+        } catch (Exception e) {
+            return PublishResult.failure(entry, startedAt, e);
+        } finally {
+            walletMetrics.recordOutboxPublishEnqueue(Duration.between(enqueueStartedAt, Instant.now()));
+        }
+    }
+
+    private void recordFailure(OutboxRow entry, Exception failure) {
+        int attemptCount = entry.attemptCount() + 1;
         String error = failure.getClass().getSimpleName() + ": "
                 + (failure.getMessage() == null ? "no message" : failure.getMessage());
-
-        entry.setAttemptCount(attemptCount);
-        entry.setLastError(error.substring(0, Math.min(error.length(), 1000)));
-        entry.setUpdatedAt(LocalDateTime.now());
+        String truncatedError = error.substring(0, Math.min(error.length(), 1000));
+        LocalDateTime updatedAt = LocalDateTime.now();
 
         if (attemptCount >= maxAttempts) {
-            entry.setStatus("FAILED");
-            entry.setNextRetryAt(null);
             log.error("Outbox event permanently failed: id={}, attempts={}, error={}",
-                    entry.getId(), attemptCount, entry.getLastError());
+                    entry.id(), attemptCount, truncatedError);
+            namedJdbcTemplate.update("""
+                    UPDATE wallet_service.outbox
+                    SET attempt_count = :attemptCount,
+                        status = 'FAILED',
+                        next_retry_at = NULL,
+                        last_error = :lastError,
+                        updated_at = :updatedAt
+                    WHERE id = :id
+                      AND status = 'PENDING'
+                    """, new MapSqlParameterSource()
+                    .addValue("attemptCount", attemptCount)
+                    .addValue("lastError", truncatedError)
+                    .addValue("updatedAt", updatedAt)
+                    .addValue("id", entry.id()));
         } else {
             long backoffMs = calculateBackoffMs(attemptCount);
-            entry.setNextRetryAt(LocalDateTime.now().plusNanos(TimeUnit.MILLISECONDS.toNanos(backoffMs)));
+            LocalDateTime nextRetryAt = updatedAt.plusNanos(TimeUnit.MILLISECONDS.toNanos(backoffMs));
+            namedJdbcTemplate.update("""
+                    UPDATE wallet_service.outbox
+                    SET attempt_count = :attemptCount,
+                        status = 'PENDING',
+                        next_retry_at = :nextRetryAt,
+                        last_error = :lastError,
+                        updated_at = :updatedAt
+                    WHERE id = :id
+                      AND status = 'PENDING'
+                    """, new MapSqlParameterSource()
+                    .addValue("attemptCount", attemptCount)
+                    .addValue("nextRetryAt", nextRetryAt)
+                    .addValue("lastError", truncatedError)
+                    .addValue("updatedAt", updatedAt)
+                    .addValue("id", entry.id()));
             walletMetrics.outboxRetryScheduled();
             log.warn("Outbox publish failed; retry scheduled: id={}, attempt={}/{}, backoffMs={}, error={}",
-                    entry.getId(), attemptCount, maxAttempts, backoffMs, entry.getLastError());
+                    entry.id(), attemptCount, maxAttempts, backoffMs, truncatedError);
         }
-        outboxRepository.save(entry);
     }
 
     private void markConfirmedAsSent(List<PublishAttempt> confirmedAttempts) {
         List<Long> ids = confirmedAttempts.stream()
-                .map(attempt -> attempt.entry().getId())
+                .map(attempt -> attempt.entry().id())
                 .toList();
         LocalDateTime updatedAt = LocalDateTime.now();
         Instant markStartedAt = Instant.now();
         int marked;
         try {
-            marked = outboxRepository.markPendingAsSent(ids, updatedAt);
+            marked = namedJdbcTemplate.update("""
+                    UPDATE wallet_service.outbox
+                    SET status = 'SENT',
+                        next_retry_at = NULL,
+                        last_error = NULL,
+                        updated_at = :updatedAt
+                    WHERE id IN (:ids)
+                      AND status = 'PENDING'
+                    """, new MapSqlParameterSource()
+                    .addValue("updatedAt", updatedAt)
+                    .addValue("ids", ids));
         } finally {
             walletMetrics.recordOutboxMarkSent(Duration.between(markStartedAt, Instant.now()));
         }
@@ -184,14 +286,9 @@ public class OutboxPoller {
 
         Instant completedAt = Instant.now();
         for (PublishAttempt attempt : confirmedAttempts) {
-            OutboxEntity entry = attempt.entry();
-            entry.setStatus("SENT");
-            entry.setNextRetryAt(null);
-            entry.setLastError(null);
-            entry.setUpdatedAt(updatedAt);
             walletMetrics.outboxPublished();
             walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), completedAt));
-            log.debug("Outbox 事件已發布: id={}, type={}", entry.getId(), entry.getEventType());
+            log.debug("Outbox event published: id={}, type={}", attempt.entry().id(), attempt.entry().eventType());
         }
     }
 
@@ -205,7 +302,7 @@ public class OutboxPoller {
     }
 
     private void awaitBrokerConfirmation(
-            OutboxEntity entry,
+            OutboxRow entry,
             CorrelationData correlationData,
             long confirmationDeadlineNanos) throws Exception {
         long remainingNanos = confirmationDeadlineNanos - System.nanoTime();
@@ -217,7 +314,7 @@ public class OutboxPoller {
             throw new AmqpException("RabbitMQ nack: " + confirm.getReason());
         }
         if (correlationData.getReturned() != null) {
-            throw new AmqpException("Unroutable outbox event: id=" + entry.getId());
+            throw new AmqpException("Unroutable outbox event: id=" + entry.id());
         }
     }
 
@@ -229,13 +326,13 @@ public class OutboxPoller {
         log.info("已清理 24 小時前的 SENT outbox 記錄");
     }
 
-    private Object deserializeEvent(OutboxEntity entry) throws Exception {
-        return switch (entry.getEventType()) {
-            case "OrderConfirmedEvent" -> objectMapper.readValue(entry.getPayload(), OrderConfirmedEvent.class);
-            case "OrderFailedEvent" -> objectMapper.readValue(entry.getPayload(), OrderFailedEvent.class);
-            case "AuctionBidConfirmedEvent" -> objectMapper.readValue(entry.getPayload(), AuctionBidConfirmedEvent.class);
-            case "WalletTradeSettledEvent" -> objectMapper.readValue(entry.getPayload(), WalletTradeSettledEvent.class);
-            default -> throw new IllegalArgumentException("Unknown event type: " + entry.getEventType());
+    private Object deserializeEvent(OutboxRow entry) throws Exception {
+        return switch (entry.eventType()) {
+            case "OrderConfirmedEvent" -> objectMapper.readValue(entry.payload(), OrderConfirmedEvent.class);
+            case "OrderFailedEvent" -> objectMapper.readValue(entry.payload(), OrderFailedEvent.class);
+            case "AuctionBidConfirmedEvent" -> objectMapper.readValue(entry.payload(), AuctionBidConfirmedEvent.class);
+            case "WalletTradeSettledEvent" -> objectMapper.readValue(entry.payload(), WalletTradeSettledEvent.class);
+            default -> throw new IllegalArgumentException("Unknown event type: " + entry.eventType());
         };
     }
 
@@ -247,9 +344,45 @@ public class OutboxPoller {
         };
     }
 
+    record OutboxRow(long id, String eventType, String routingKey, String payload, int attemptCount) {
+    }
+
     private record PublishAttempt(
-            OutboxEntity entry,
+            OutboxRow entry,
             CorrelationData correlationData,
             Instant startedAt) {
+    }
+
+    private record PublishResult(
+            OutboxRow entry,
+            CorrelationData correlationData,
+            Instant startedAt,
+            Exception failure) {
+
+        static PublishResult success(
+                OutboxRow entry,
+                CorrelationData correlationData,
+                Instant startedAt) {
+            return new PublishResult(entry, correlationData, startedAt, null);
+        }
+
+        static PublishResult failure(OutboxRow entry, Instant startedAt, Exception failure) {
+            return new PublishResult(entry, null, startedAt, failure);
+        }
+
+        boolean succeeded() {
+            return failure == null;
+        }
+    }
+
+    private static class WalletOutboxPublishThreadFactory implements java.util.concurrent.ThreadFactory {
+        private final AtomicInteger sequence = new AtomicInteger();
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "wallet-outbox-publisher-" + sequence.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        }
     }
 }

@@ -27,7 +27,10 @@ public class WalletMetrics {
     private final Counter outboxRequeuedCounter;
     private final Timer outboxPublishTimer;
     private final Timer outboxSelectTimer;
+    private final Timer outboxPublishEnqueueTimer;
+    private final Timer outboxConfirmTimer;
     private final Timer outboxMarkSentTimer;
+    private final Timer outboxBatchTimer;
     private final Counter tradeSettlementConsumedCounter;
     private final Counter tradeSettlementCompletedCounter;
     private final Counter tradeSettlementDuplicateSkippedCounter;
@@ -103,10 +106,22 @@ public class WalletMetrics {
                 registry,
                 "eap_wallet_outbox_select_duration",
                 "Time spent selecting pending wallet outbox records");
+        this.outboxPublishEnqueueTimer = stageTimer(
+                registry,
+                "eap_wallet_outbox_publish_enqueue_duration",
+                "Time spent deserializing and enqueueing wallet outbox records to RabbitMQ");
+        this.outboxConfirmTimer = stageTimer(
+                registry,
+                "eap_wallet_outbox_confirm_duration",
+                "Time spent waiting for RabbitMQ publisher confirms for wallet outbox records");
         this.outboxMarkSentTimer = stageTimer(
                 registry,
                 "eap_wallet_outbox_mark_sent_duration",
                 "Time spent marking confirmed wallet outbox records as SENT");
+        this.outboxBatchTimer = stageTimer(
+                registry,
+                "eap_wallet_outbox_batch_duration",
+                "Wall-clock time spent processing one wallet outbox relay batch");
         this.tradeSettlementConsumedCounter = Counter.builder("eap_wallet_trade_settlement_consumed_total")
                 .description("Total TradeExecutedEvent messages consumed by wallet settlement")
                 .register(registry);
@@ -193,8 +208,20 @@ public class WalletMetrics {
         outboxSelectTimer.record(duration);
     }
 
+    public void recordOutboxPublishEnqueue(Duration duration) {
+        outboxPublishEnqueueTimer.record(duration);
+    }
+
+    public void recordOutboxConfirm(Duration duration) {
+        outboxConfirmTimer.record(duration);
+    }
+
     public void recordOutboxMarkSent(Duration duration) {
         outboxMarkSentTimer.record(duration);
+    }
+
+    public void recordOutboxBatch(Duration duration) {
+        outboxBatchTimer.record(duration);
     }
 
     public void tradeSettlementConsumed() {
