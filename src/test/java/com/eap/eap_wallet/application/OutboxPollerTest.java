@@ -9,6 +9,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.amqp.core.Message;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -58,7 +59,6 @@ class OutboxPollerTest {
                 jdbcTemplate,
                 namedJdbcTemplate,
                 rabbitTemplate,
-                new ObjectMapper(),
                 walletMetrics,
                 25,
                 1,
@@ -85,7 +85,7 @@ class OutboxPollerTest {
             CorrelationData correlationData = invocation.getArgument(3);
             correlationData.getFuture().complete(new CorrelationData.Confirm(true, null));
             return null;
-        }).when(rabbitTemplate).convertAndSend(anyString(), anyString(), (Object) any(), any(CorrelationData.class));
+        }).when(rabbitTemplate).send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
 
         outboxPoller.pollAndPublish();
 
@@ -103,7 +103,7 @@ class OutboxPollerTest {
             CorrelationData correlationData = invocation.getArgument(3);
             correlationData.getFuture().complete(new CorrelationData.Confirm(false, "broker rejected publish"));
             return null;
-        }).when(rabbitTemplate).convertAndSend(anyString(), anyString(), (Object) any(), any(CorrelationData.class));
+        }).when(rabbitTemplate).send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
 
         outboxPoller.pollAndPublish();
 
@@ -125,7 +125,7 @@ class OutboxPollerTest {
             CorrelationData correlationData = invocation.getArgument(3);
             correlationData.getFuture().complete(new CorrelationData.Confirm(false, "still rejected"));
             return null;
-        }).when(rabbitTemplate).convertAndSend(anyString(), anyString(), (Object) any(), any(CorrelationData.class));
+        }).when(rabbitTemplate).send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
 
         outboxPoller.pollAndPublish();
 
@@ -157,7 +157,6 @@ class OutboxPollerTest {
                 jdbcTemplate,
                 namedJdbcTemplate,
                 rabbitTemplate,
-                new ObjectMapper(),
                 walletMetrics,
                 2,
                 1,
@@ -173,7 +172,7 @@ class OutboxPollerTest {
             CorrelationData correlationData = invocation.getArgument(3);
             correlationData.getFuture().complete(new CorrelationData.Confirm(true, null));
             return null;
-        }).when(rabbitTemplate).convertAndSend(anyString(), anyString(), (Object) any(), any(CorrelationData.class));
+        }).when(rabbitTemplate).send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
 
         smallBatchPoller.pollAndPublish();
 
@@ -192,7 +191,6 @@ class OutboxPollerTest {
                 jdbcTemplate,
                 namedJdbcTemplate,
                 rabbitTemplate,
-                new ObjectMapper(),
                 walletMetrics,
                 2,
                 1,
@@ -214,8 +212,8 @@ class OutboxPollerTest {
                         .complete(new CorrelationData.Confirm(true, null)));
             }
             return null;
-        }).when(rabbitTemplate).convertAndSend(
-                anyString(), anyString(), (Object) any(), any(CorrelationData.class));
+        }).when(rabbitTemplate).send(
+                anyString(), anyString(), any(Message.class), any(CorrelationData.class));
 
         smallBatchPoller.pollAndPublish();
 

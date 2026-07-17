@@ -1,15 +1,13 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.common.constants.RabbitMQConstants;
-import com.eap.common.event.AuctionBidConfirmedEvent;
-import com.eap.common.event.OrderConfirmedEvent;
-import com.eap.common.event.OrderFailedEvent;
-import com.eap.common.event.WalletTradeSettledEvent;
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.AmqpException;
+import org.springframework.amqp.core.Message;
+import org.springframework.amqp.core.MessageDeliveryMode;
+import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
@@ -22,6 +20,7 @@ import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
 import jakarta.annotation.PreDestroy;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDateTime;
@@ -43,7 +42,6 @@ public class OutboxPoller {
     private final JdbcTemplate jdbcTemplate;
     private final NamedParameterJdbcTemplate namedJdbcTemplate;
     private final RabbitTemplate rabbitTemplate;
-    private final ObjectMapper objectMapper;
     private final WalletMetrics walletMetrics;
     private final int batchSize;
     private final int publishConcurrency;
@@ -58,7 +56,6 @@ public class OutboxPoller {
             JdbcTemplate jdbcTemplate,
             NamedParameterJdbcTemplate namedJdbcTemplate,
             RabbitTemplate rabbitTemplate,
-            ObjectMapper objectMapper,
             WalletMetrics walletMetrics,
             @Value("${eap.wallet.outbox-relay.batch-size:200}") int batchSize,
             @Value("${eap.wallet.outbox-relay.publish-concurrency:1}") int publishConcurrency,
@@ -70,7 +67,6 @@ public class OutboxPoller {
         this.jdbcTemplate = jdbcTemplate;
         this.namedJdbcTemplate = namedJdbcTemplate;
         this.rabbitTemplate = rabbitTemplate;
-        this.objectMapper = objectMapper;
         this.walletMetrics = walletMetrics;
         this.batchSize = batchSize;
         this.publishConcurrency = Math.max(1, publishConcurrency);
@@ -197,10 +193,9 @@ public class OutboxPoller {
         Instant startedAt = Instant.now();
         Instant enqueueStartedAt = Instant.now();
         try {
-            Object event = deserializeEvent(entry);
             String exchange = resolveExchange(entry.eventType());
             CorrelationData correlationData = new CorrelationData(Long.toString(entry.id()));
-            rabbitTemplate.convertAndSend(exchange, entry.routingKey(), event, correlationData);
+            rabbitTemplate.send(exchange, entry.routingKey(), toJsonMessage(entry), correlationData);
             return PublishResult.success(entry, correlationData, startedAt);
         } catch (Exception e) {
             return PublishResult.failure(entry, startedAt, e);
@@ -326,14 +321,20 @@ public class OutboxPoller {
         log.info("已清理 24 小時前的 SENT outbox 記錄");
     }
 
-    private Object deserializeEvent(OutboxRow entry) throws Exception {
-        return switch (entry.eventType()) {
-            case "OrderConfirmedEvent" -> objectMapper.readValue(entry.payload(), OrderConfirmedEvent.class);
-            case "OrderFailedEvent" -> objectMapper.readValue(entry.payload(), OrderFailedEvent.class);
-            case "AuctionBidConfirmedEvent" -> objectMapper.readValue(entry.payload(), AuctionBidConfirmedEvent.class);
-            case "WalletTradeSettledEvent" -> objectMapper.readValue(entry.payload(), WalletTradeSettledEvent.class);
-            default -> throw new IllegalArgumentException("Unknown event type: " + entry.eventType());
-        };
+    private Message toJsonMessage(OutboxRow entry) {
+        switch (entry.eventType()) {
+            case "OrderConfirmedEvent":
+            case "OrderFailedEvent":
+            case "AuctionBidConfirmedEvent":
+            case "WalletTradeSettledEvent":
+                MessageProperties properties = new MessageProperties();
+                properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
+                properties.setContentEncoding(StandardCharsets.UTF_8.name());
+                properties.setDeliveryMode(MessageDeliveryMode.PERSISTENT);
+                return new Message(entry.payload().getBytes(StandardCharsets.UTF_8), properties);
+            default:
+                throw new IllegalArgumentException("Unknown event type: " + entry.eventType());
+        }
     }
 
     private String resolveExchange(String eventType) {
