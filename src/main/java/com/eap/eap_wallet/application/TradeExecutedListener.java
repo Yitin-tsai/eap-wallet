@@ -51,7 +51,7 @@ public class TradeExecutedListener {
                     return;
                 } catch (DataIntegrityViolationException e) {
                     walletMetrics.tradeSettlementDuplicateSkipped();
-                    log.info("Duplicate TradeExecutedEvent settlement skipped: tradeId={}", event.getTradeId());
+                    log.debug("Duplicate TradeExecutedEvent settlement skipped: tradeId={}", event.getTradeId());
                     return;
                 } catch (ObjectOptimisticLockingFailureException e) {
                     walletMetrics.optimisticLockRetry();
@@ -87,7 +87,7 @@ public class TradeExecutedListener {
         }
 
         walletMetrics.tradeSettlementCompleted();
-        log.info("Trade wallet settlement completed: tradeId={}, buyerId={}, sellerId={}, dealCurrency={}, quantity={}",
+        log.debug("Trade wallet settlement completed: tradeId={}, buyerId={}, sellerId={}, dealCurrency={}, quantity={}",
                 event.getTradeId(), event.getBuyerId(), event.getSellerId(),
                 outcome.dealCurrency(), event.getQuantity());
     }
