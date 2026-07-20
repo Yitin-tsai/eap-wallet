@@ -109,7 +109,7 @@ public class WalletMetrics {
         this.outboxPublishEnqueueTimer = stageTimer(
                 registry,
                 "eap_wallet_outbox_publish_enqueue_duration",
-                "Time spent deserializing and enqueueing wallet outbox records to RabbitMQ");
+                "Time spent building and enqueueing wallet outbox messages to RabbitMQ");
         this.outboxConfirmTimer = stageTimer(
                 registry,
                 "eap_wallet_outbox_confirm_duration",
