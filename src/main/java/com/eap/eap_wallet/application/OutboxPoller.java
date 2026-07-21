@@ -9,6 +9,7 @@ import org.springframework.amqp.core.Message;
 import org.springframework.amqp.core.MessageDeliveryMode;
 import org.springframework.amqp.core.MessageProperties;
 import org.springframework.amqp.rabbit.connection.CorrelationData;
+import org.springframework.amqp.rabbit.core.RabbitOperations;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -175,27 +176,67 @@ public class OutboxPoller {
     private List<PublishResult> publishBatch(List<OutboxRow> pending) {
         if (publishConcurrency == 1 || pending.size() <= 1) {
             List<PublishResult> results = new ArrayList<>(pending.size());
-            for (OutboxRow entry : pending) {
-                results.add(publishOne(entry));
+            try {
+                rabbitTemplate.invoke(operations -> {
+                    for (OutboxRow entry : pending) {
+                        results.add(publishOne(entry, operations));
+                    }
+                    return null;
+                });
+            } catch (Exception e) {
+                int publishedOrFailed = results.size();
+                for (int i = publishedOrFailed; i < pending.size(); i++) {
+                    results.add(PublishResult.failure(pending.get(i), Instant.now(), e));
+                }
             }
             return results;
         }
 
-        List<CompletableFuture<PublishResult>> futures = pending.stream()
-                .map(entry -> CompletableFuture.supplyAsync(() -> publishOne(entry), publishExecutor))
+        List<List<OutboxRow>> chunks = partition(pending, publishConcurrency);
+        List<CompletableFuture<List<PublishResult>>> futures = chunks.stream()
+                .map(chunk -> CompletableFuture.supplyAsync(() -> publishChunk(chunk), publishExecutor))
                 .toList();
         return futures.stream()
                 .map(CompletableFuture::join)
+                .flatMap(List::stream)
                 .toList();
     }
 
-    private PublishResult publishOne(OutboxRow entry) {
+    private List<PublishResult> publishChunk(List<OutboxRow> chunk) {
+        List<PublishResult> results = new ArrayList<>(chunk.size());
+        try {
+            rabbitTemplate.invoke(operations -> {
+                for (OutboxRow entry : chunk) {
+                    results.add(publishOne(entry, operations));
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            int publishedOrFailed = results.size();
+            for (int i = publishedOrFailed; i < chunk.size(); i++) {
+                results.add(PublishResult.failure(chunk.get(i), Instant.now(), e));
+            }
+        }
+        return results;
+    }
+
+    private List<List<OutboxRow>> partition(List<OutboxRow> pending, int maxChunks) {
+        int chunkCount = Math.min(maxChunks, pending.size());
+        int chunkSize = (int) Math.ceil(pending.size() / (double) chunkCount);
+        List<List<OutboxRow>> chunks = new ArrayList<>(chunkCount);
+        for (int start = 0; start < pending.size(); start += chunkSize) {
+            chunks.add(pending.subList(start, Math.min(start + chunkSize, pending.size())));
+        }
+        return chunks;
+    }
+
+    private PublishResult publishOne(OutboxRow entry, RabbitOperations operations) {
         Instant startedAt = Instant.now();
         Instant enqueueStartedAt = Instant.now();
         try {
             String exchange = resolveExchange(entry.eventType());
             CorrelationData correlationData = new CorrelationData(Long.toString(entry.id()));
-            rabbitTemplate.send(exchange, entry.routingKey(), toJsonMessage(entry), correlationData);
+            operations.send(exchange, entry.routingKey(), toJsonMessage(entry), correlationData);
             return PublishResult.success(entry, correlationData, startedAt);
         } catch (Exception e) {
             return PublishResult.failure(entry, startedAt, e);

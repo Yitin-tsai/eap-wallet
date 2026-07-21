@@ -21,18 +21,18 @@ eap:
     listeners:
       order-submitted:
         concurrency: 32
-      order-matched:
-        concurrency: 16
       trade-executed:
         concurrency: 12
     outbox-relay:
       batch-size: 500
       publish-concurrency: 1
       poll-interval-ms: 100
+    trade-settlement-relay:
+      batch-size: 500
+      poll-interval-ms: 100
 
 logging:
   level:
     '[com.eap.eap_wallet.application.CreateOrderListener]': WARN
-    '[com.eap.eap_wallet.application.MatchedOrderListener]': WARN
     '[com.eap.eap_wallet.controller.WalletController]': WARN
     '[org.springframework.amqp.rabbit.listener]': WARN

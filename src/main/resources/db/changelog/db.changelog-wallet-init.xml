@@ -198,4 +198,49 @@
             columnNames="trade_id" constraintName="uk_trade_settlements_trade_id"/>
     </changeSet>
 
+    <changeSet id="wallet-015" author="eap">
+        <comment>Use trade_id as the settlement primary key to avoid a redundant surrogate-key index write</comment>
+        <sql>
+            ALTER TABLE wallet_service.trade_settlements
+                DROP CONSTRAINT IF EXISTS uk_trade_settlements_trade_id;
+            ALTER TABLE wallet_service.trade_settlements
+                DROP CONSTRAINT IF EXISTS trade_settlements_pkey;
+            ALTER TABLE wallet_service.trade_settlements
+                ADD CONSTRAINT trade_settlements_pkey PRIMARY KEY (trade_id);
+            ALTER TABLE wallet_service.trade_settlements
+                DROP COLUMN IF EXISTS id;
+        </sql>
+    </changeSet>
+
+    <changeSet id="wallet-016" author="eap">
+        <comment>Use trade_settlements as the WalletTradeSettled relay source to avoid a separate hot-path outbox insert</comment>
+        <addColumn tableName="trade_settlements" schemaName="wallet_service">
+            <column name="buyer_id" type="UUID"/>
+            <column name="seller_id" type="UUID"/>
+            <column name="buyer_order_id" type="UUID"/>
+            <column name="seller_order_id" type="UUID"/>
+            <column name="deal_price" type="INT"/>
+            <column name="quantity" type="INT"/>
+            <column name="buyer_locked_currency" type="INT"/>
+            <column name="buyer_refund_currency" type="INT"/>
+            <column name="seller_received_currency" type="INT"/>
+            <column name="event_status" type="VARCHAR(10)" defaultValue="SENT">
+                <constraints nullable="false"/>
+            </column>
+            <column name="attempt_count" type="INT" defaultValueNumeric="0">
+                <constraints nullable="false"/>
+            </column>
+            <column name="next_retry_at" type="TIMESTAMP"/>
+            <column name="last_error" type="VARCHAR(1000)"/>
+            <column name="updated_at" type="TIMESTAMP" defaultValueComputed="CURRENT_TIMESTAMP">
+                <constraints nullable="false"/>
+            </column>
+        </addColumn>
+        <sql>
+            CREATE INDEX idx_trade_settlements_pending_event
+            ON wallet_service.trade_settlements(next_retry_at, settled_at, trade_id)
+            WHERE event_status = 'PENDING';
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>

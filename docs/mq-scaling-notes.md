@@ -5,6 +5,7 @@
 > Order HTTP 到 Wallet Outbox 的 1,000 TPS 全鏈路測試與兩輪瓶頸分析，見 [`docs/order-wallet-e2e-load-test.md`](./order-wallet-e2e-load-test.md)。
 
 > 2026-05-05 ~ 05-06 討論紀錄
+> Current status: this note is historical. TPS-80 retired the legacy `order.matched` runtime bus, `wallet.orderMatched.queue`, `order.orderMatched.queue`, `MatchedOrderListener`, and `MatchEventListener`. Current matched-trade settlement uses `TradeExecutedEvent`, `OrderTradeAppliedEvent`, `WalletTradeSettledEvent`, and MatchEngine completion markers.
 
 ---
 
@@ -409,8 +410,8 @@ eap-wallet (via Outbox)
   OrderFailed           --> routing: order.failed --------> order.orderFailed.queue ----------> eap-order OrderStatusUpdateListener
 
 eap-matchEngine
-  MatchingEngineService --> routing: order.matched ----+--> order.orderMatched.queue ----------> eap-order MatchEventListener
-                                                       +--> wallet.orderMatched.queue --------> eap-wallet MatchedOrderListener
+  MatchingEngineService --> routing: trade.executed ---+--> order.tradeExecuted.queue ---------> eap-order TradeExecutedListener
+                                                       +--> wallet.tradeExecuted.queue --------> eap-wallet TradeExecutedListener
 ```
 
 統計：1 個 Exchange、5 個 Routing Key、6 個 Queue、6 個 Binding
@@ -439,7 +440,7 @@ Buy#2 -> wallet pod-2（同時讀到舊餘額，也鎖定 1000）
 ```
 
 - AuctionBidListener / AuctionSettlementListener 有做 retry（最多 3 次）
-- CreateOrderListener / MatchedOrderListener **沒有 retry**，並發時會直接 exception
+- Historical note: CreateOrderListener / retired MatchedOrderListener 當時沒有 retry，並發時會直接 exception。
 
 ### Prefetch（背壓機制）
 
@@ -503,10 +504,10 @@ eap-wallet (via Outbox)          order.confirmed.stream [P0|P1|P2]
                                      +-- group: "order" -----------------> eap-order OrderStatusUpdateListener
 
 
-eap-matchEngine                  order.matched.stream [P0|P1|P2]
-  MatchingEngineService -->        partition by: buyerId
-                                     +-- group: "order" -----------------> eap-order MatchEventListener
-                                     +-- group: "wallet" ----------------> eap-wallet MatchedOrderListener
+eap-matchEngine                  trade.executed.stream [P0|P1|P2]
+  MatchingEngineService -->        partition by: tradeId / marketId
+                                     +-- group: "order" -----------------> eap-order TradeExecutedListener
+                                     +-- group: "wallet" ----------------> eap-wallet TradeExecutedListener
 ```
 
 統計：0 個 Exchange、0 個 Binding、4 個 Super Stream（各 3 partitions）、7 個 Consumer Group 訂閱
@@ -674,7 +675,7 @@ rabbitmq:
 | RabbitMQ 版本 | 需要 3.11+，確認 docker image 版本 |
 | matched 事件 partition key | 買方和賣方是不同 userId，只能選一個當 key（見下方解法） |
 
-### OrderMatchedEvent 的 partition key 問題
+### Historical: retired OrderMatchedEvent 的 partition key 問題
 
 matched 事件同時影響買方和賣方錢包，但 partition key 只能選一個：
 
@@ -692,7 +693,7 @@ matched 事件同時影響買方和賣方錢包，但 partition key 只能選一
 - Constants: `eap-common/.../constants/RabbitMQConstants.java`
 - Wallet entity (@Version): `eap-wallet/.../domain/entity/WalletEntity.java`
 - Wallet consumer: `eap-wallet/.../application/CreateOrderListener.java`
-- Wallet matched: `eap-wallet/.../application/MatchedOrderListener.java`
+- Wallet matched: retired `MatchedOrderListener`; current path is `eap-wallet/.../application/TradeExecutedListener.java`
 - MatchEngine producer: `eap-matchEngine/.../application/MatchingEngineService.java`
 - Order publisher: `eap-order/.../application/PlaceBuyOrderService.java`
 - Order listeners: `eap-order/.../application/OrderStatusUpdateListener.java`
@@ -704,7 +705,7 @@ matched 事件同時影響買方和賣方錢包，但 partition key 只能選一
 Winston（架構師）診斷後，確認問題是 CDA listeners 缺少 optimistic lock retry，不需要 Super Stream：
 
 1. **CreateOrderListener** — 改用 TransactionTemplate + retry loop（max 3），與 AuctionBidListener 一致
-2. **MatchedOrderListener** — 同上
+2. **MatchedOrderListener** — retired in TPS-80; current settlement path is `TradeExecutedListener`
 3. **所有 module application.yml** — 加入 `prefetch: 10` + `default-requeue-rejected: false`
 4. **CreateOrderListenerTest** — 重寫，新增 optimistic lock retry 成功/失敗測試
 

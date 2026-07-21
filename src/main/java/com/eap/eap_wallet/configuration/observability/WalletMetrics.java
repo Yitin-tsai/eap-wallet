@@ -39,6 +39,14 @@ public class WalletMetrics {
     private final Timer tradeSettlementSerializationTimer;
     private final Timer tradeSettlementTransactionTimer;
     private final Timer tradeSettlementCteTimer;
+    private final Counter tradeSettlementRelayPublishedCounter;
+    private final Counter tradeSettlementRelayPublishFailedCounter;
+    private final Counter tradeSettlementRelayRetryScheduledCounter;
+    private final Timer tradeSettlementRelaySelectTimer;
+    private final Timer tradeSettlementRelayPublishEnqueueTimer;
+    private final Timer tradeSettlementRelayConfirmTimer;
+    private final Timer tradeSettlementRelayMarkSentTimer;
+    private final Timer tradeSettlementRelayBatchTimer;
 
     public WalletMetrics(MeterRegistry registry, OutboxRepository outboxRepository) {
         this.orderSubmittedConsumedCounter = Counter.builder("eap_wallet_order_submitted_consumed_total")
@@ -150,6 +158,35 @@ public class WalletMetrics {
                 registry,
                 "eap_wallet_trade_settlement_cte_duration",
                 "Time spent executing wallet trade settlement SQL CTE");
+        this.tradeSettlementRelayPublishedCounter = Counter.builder("eap_wallet_trade_settlement_relay_published_total")
+                .description("Total WalletTradeSettled settlement relay records confirmed by RabbitMQ")
+                .register(registry);
+        this.tradeSettlementRelayPublishFailedCounter = Counter.builder("eap_wallet_trade_settlement_relay_publish_failed_total")
+                .description("Total WalletTradeSettled settlement relay publish attempts that failed")
+                .register(registry);
+        this.tradeSettlementRelayRetryScheduledCounter = Counter.builder("eap_wallet_trade_settlement_relay_retry_scheduled_total")
+                .description("Total WalletTradeSettled settlement relay retries scheduled with backoff")
+                .register(registry);
+        this.tradeSettlementRelaySelectTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_relay_select_duration",
+                "Time spent selecting pending WalletTradeSettled settlement rows");
+        this.tradeSettlementRelayPublishEnqueueTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_relay_publish_enqueue_duration",
+                "Time spent building and enqueueing WalletTradeSettled messages to RabbitMQ");
+        this.tradeSettlementRelayConfirmTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_relay_confirm_duration",
+                "Time spent waiting for RabbitMQ publisher confirms for WalletTradeSettled messages");
+        this.tradeSettlementRelayMarkSentTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_relay_mark_sent_duration",
+                "Time spent marking WalletTradeSettled settlement rows as SENT");
+        this.tradeSettlementRelayBatchTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_relay_batch_duration",
+                "Wall-clock time spent processing one WalletTradeSettled settlement relay batch");
     }
 
     public void orderSubmittedConsumed() {
@@ -254,6 +291,38 @@ public class WalletMetrics {
 
     public void recordTradeSettlementCte(Duration duration) {
         tradeSettlementCteTimer.record(duration);
+    }
+
+    public void tradeSettlementRelayPublished() {
+        tradeSettlementRelayPublishedCounter.increment();
+    }
+
+    public void tradeSettlementRelayPublishFailed() {
+        tradeSettlementRelayPublishFailedCounter.increment();
+    }
+
+    public void tradeSettlementRelayRetryScheduled() {
+        tradeSettlementRelayRetryScheduledCounter.increment();
+    }
+
+    public void recordTradeSettlementRelaySelect(Duration duration) {
+        tradeSettlementRelaySelectTimer.record(duration);
+    }
+
+    public void recordTradeSettlementRelayPublishEnqueue(Duration duration) {
+        tradeSettlementRelayPublishEnqueueTimer.record(duration);
+    }
+
+    public void recordTradeSettlementRelayConfirm(Duration duration) {
+        tradeSettlementRelayConfirmTimer.record(duration);
+    }
+
+    public void recordTradeSettlementRelayMarkSent(Duration duration) {
+        tradeSettlementRelayMarkSentTimer.record(duration);
+    }
+
+    public void recordTradeSettlementRelayBatch(Duration duration) {
+        tradeSettlementRelayBatchTimer.record(duration);
     }
 
     private Timer stageTimer(MeterRegistry registry, String name, String description) {

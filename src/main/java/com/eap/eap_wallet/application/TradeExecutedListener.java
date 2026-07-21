@@ -1,10 +1,7 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.common.event.TradeExecutedEvent;
-import com.eap.common.event.WalletTradeSettledEvent;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
@@ -25,7 +22,6 @@ import static com.eap.common.constants.RabbitMQConstants.WALLET_TRADE_EXECUTED_Q
 public class TradeExecutedListener {
 
     private final WalletTradeSettlementAppender settlementAppender;
-    private final ObjectMapper objectMapper;
     private final PlatformTransactionManager transactionManager;
     private final WalletMetrics walletMetrics;
 
@@ -42,12 +38,11 @@ public class TradeExecutedListener {
             TransactionTemplate txTemplate = new TransactionTemplate(transactionManager);
             int maxRetries = 3;
             LocalDateTime settledAt = event.getOccurredAt() == null ? LocalDateTime.now() : event.getOccurredAt();
-            String walletTradeSettledPayload = serializeWalletTradeSettledEvent(event, settledAt);
 
             for (int attempt = 1; attempt <= maxRetries; attempt++) {
                 long transactionStartedAt = System.nanoTime();
                 try {
-                    txTemplate.executeWithoutResult(status -> settle(event, walletTradeSettledPayload, settledAt));
+                    txTemplate.executeWithoutResult(status -> settle(event, settledAt));
                     return;
                 } catch (DataIntegrityViolationException e) {
                     walletMetrics.tradeSettlementDuplicateSkipped();
@@ -77,9 +72,9 @@ public class TradeExecutedListener {
         }
     }
 
-    private void settle(TradeExecutedEvent event, String walletTradeSettledPayload, LocalDateTime settledAt) {
+    private void settle(TradeExecutedEvent event, LocalDateTime settledAt) {
         WalletTradeSettlementAppender.SettlementOutcome outcome =
-                settlementAppender.append(event, walletTradeSettledPayload, settledAt);
+                settlementAppender.append(event, settledAt);
         if (outcome.duplicate()) {
             walletMetrics.tradeSettlementDuplicateSkipped();
             log.debug("Trade already settled, skipping duplicate: tradeId={}", event.getTradeId());
@@ -90,35 +85,5 @@ public class TradeExecutedListener {
         log.debug("Trade wallet settlement completed: tradeId={}, buyerId={}, sellerId={}, dealCurrency={}, quantity={}",
                 event.getTradeId(), event.getBuyerId(), event.getSellerId(),
                 outcome.dealCurrency(), event.getQuantity());
-    }
-
-    private String serializeWalletTradeSettledEvent(TradeExecutedEvent event, LocalDateTime settledAt) {
-        long serializationStartedAt = System.nanoTime();
-        int dealCurrency = event.getDealPrice() * event.getQuantity();
-        int originalLockedCurrency = event.getOriginBuyerPrice() * event.getQuantity();
-        int refundCurrency = originalLockedCurrency - dealCurrency;
-        WalletTradeSettledEvent settledEvent = WalletTradeSettledEvent.builder()
-                .tradeId(event.getTradeId())
-                .legacyMatchId(event.getLegacyMatchId())
-                .buyerId(event.getBuyerId())
-                .sellerId(event.getSellerId())
-                .buyerOrderId(event.getBuyerOrderId())
-                .sellerOrderId(event.getSellerOrderId())
-                .dealPrice(event.getDealPrice())
-                .quantity(event.getQuantity())
-                .buyerLockedCurrency(originalLockedCurrency)
-                .buyerRefundCurrency(refundCurrency)
-                .sellerReceivedCurrency(dealCurrency)
-                .settledAt(settledAt)
-                .build();
-        try {
-            return objectMapper.writeValueAsString(settledEvent);
-        } catch (JsonProcessingException e) {
-            throw new IllegalStateException("Failed to serialize WalletTradeSettledEvent: tradeId="
-                    + event.getTradeId(), e);
-        } finally {
-            walletMetrics.recordTradeSettlementSerialization(
-                    Duration.ofNanos(System.nanoTime() - serializationStartedAt));
-        }
     }
 }

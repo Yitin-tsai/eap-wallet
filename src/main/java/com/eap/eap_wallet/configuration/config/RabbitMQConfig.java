@@ -17,8 +17,8 @@ import static com.eap.common.constants.RabbitMQConstants.*;
  * Wallet Module RabbitMQ Configuration
  *
  * This module consumes:
- * - order.create events (for wallet validation)
- * - order.matched events (for balance updates)
+ * - order.submitted events (for wallet validation)
+ * - trade.executed events (for matched-trade settlement)
  * - auction.bid.submitted events (for auction fund locking)
  * - auction.cleared events (for auction settlement)
  *
@@ -68,14 +68,6 @@ public class RabbitMQConfig {
         .build();
   }
 
-  // Wallet-specific queue for order matched events (balance settlement)
-  @Bean
-  public Queue walletOrderMatchedQueue() {
-    return QueueBuilder.durable(WALLET_ORDER_MATCHED_QUEUE)
-        .withArgument("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE)
-        .build();
-  }
-
   @Bean
   public Queue walletTradeExecutedQueue() {
     return QueueBuilder.durable(WALLET_TRADE_EXECUTED_QUEUE)
@@ -87,12 +79,6 @@ public class RabbitMQConfig {
   public Binding walletOrderSubmittedBinding(@Qualifier("walletOrderSubmittedQueue") Queue walletOrderSubmittedQueue,
       @Qualifier("orderExchange") TopicExchange orderExchange) {
     return BindingBuilder.bind(walletOrderSubmittedQueue).to(orderExchange).with(ORDER_SUBMITTED_KEY);
-  }
-
-  @Bean
-  public Binding walletOrderMatchedBinding(@Qualifier("walletOrderMatchedQueue") Queue walletOrderMatchedQueue,
-      @Qualifier("orderExchange") TopicExchange orderExchange) {
-    return BindingBuilder.bind(walletOrderMatchedQueue).to(orderExchange).with(ORDER_MATCHED_KEY);
   }
 
   @Bean

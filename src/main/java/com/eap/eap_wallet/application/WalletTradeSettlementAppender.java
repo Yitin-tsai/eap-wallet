@@ -10,8 +10,6 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 import java.time.LocalDateTime;
 
-import static com.eap.common.constants.RabbitMQConstants.TRADE_WALLET_SETTLED_KEY;
-
 @Component
 @RequiredArgsConstructor
 public class WalletTradeSettlementAppender {
@@ -21,7 +19,6 @@ public class WalletTradeSettlementAppender {
 
     public SettlementOutcome append(
             TradeExecutedEvent event,
-            String walletTradeSettledPayload,
             LocalDateTime settledAt) {
         int dealCurrency = event.getDealPrice() * event.getQuantity();
         int originalLockedCurrency = event.getOriginBuyerPrice() * event.getQuantity();
@@ -30,15 +27,21 @@ public class WalletTradeSettlementAppender {
         int[] insertedSettlements = {0};
         int[] updatedBuyers = {0};
         int[] updatedSellers = {0};
-        int[] insertedOutboxes = {0};
         long cteStartedAt = System.nanoTime();
         try {
             jdbcTemplate.query("""
                 WITH settlement AS (
                     INSERT INTO wallet_service.trade_settlements
-                        (trade_id, legacy_match_id, settled_at)
+                        (trade_id, legacy_match_id, settled_at,
+                         buyer_id, seller_id, buyer_order_id, seller_order_id,
+                         deal_price, quantity, buyer_locked_currency, buyer_refund_currency,
+                         seller_received_currency, event_status, attempt_count,
+                         next_retry_at, updated_at)
                     VALUES
-                        (:tradeId, :legacyMatchId, :settledAt)
+                        (:tradeId, :legacyMatchId, :settledAt,
+                         :buyerId, :sellerId, :buyerOrderId, :sellerOrderId,
+                         :dealPrice, :quantity, :originalLockedCurrency, :refundCurrency,
+                         :dealCurrency, 'PENDING', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                     ON CONFLICT (trade_id) DO NOTHING
                     RETURNING trade_id
                 ),
@@ -64,39 +67,27 @@ public class WalletTradeSettlementAppender {
                       AND EXISTS (SELECT 1 FROM settlement)
                       AND locked_amount >= :quantity
                     RETURNING 1
-                ),
-                outbox_insert AS (
-                    INSERT INTO wallet_service.outbox
-                        (event_type, routing_key, payload, status, attempt_count,
-                         next_retry_at, created_at, updated_at)
-                    SELECT :outboxEventType, :outboxRoutingKey, :outboxPayload,
-                           'PENDING', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
-                    WHERE (SELECT COUNT(*) FROM buyer_update) = 1
-                      AND (SELECT COUNT(*) FROM seller_update) = 1
-                    RETURNING 1
                 )
                 SELECT
                     (SELECT COUNT(*) FROM settlement) AS inserted_settlements,
                     (SELECT COUNT(*) FROM buyer_update) AS updated_buyers,
-                    (SELECT COUNT(*) FROM seller_update) AS updated_sellers,
-                    (SELECT COUNT(*) FROM outbox_insert) AS inserted_outboxes
+                    (SELECT COUNT(*) FROM seller_update) AS updated_sellers
                 """, new MapSqlParameterSource()
                 .addValue("tradeId", event.getTradeId())
                 .addValue("legacyMatchId", event.getLegacyMatchId())
                 .addValue("settledAt", settledAt)
                 .addValue("buyerId", event.getBuyerId())
                 .addValue("sellerId", event.getSellerId())
+                .addValue("buyerOrderId", event.getBuyerOrderId())
+                .addValue("sellerOrderId", event.getSellerOrderId())
+                .addValue("dealPrice", event.getDealPrice())
                 .addValue("originalLockedCurrency", originalLockedCurrency)
                 .addValue("refundCurrency", refundCurrency)
                 .addValue("dealCurrency", dealCurrency)
-                .addValue("quantity", event.getQuantity())
-                .addValue("outboxEventType", "WalletTradeSettledEvent")
-                .addValue("outboxRoutingKey", TRADE_WALLET_SETTLED_KEY)
-                .addValue("outboxPayload", walletTradeSettledPayload), rs -> {
+                .addValue("quantity", event.getQuantity()), rs -> {
                     insertedSettlements[0] = rs.getInt("inserted_settlements");
                     updatedBuyers[0] = rs.getInt("updated_buyers");
                     updatedSellers[0] = rs.getInt("updated_sellers");
-                    insertedOutboxes[0] = rs.getInt("inserted_outboxes");
                 });
         } finally {
             walletMetrics.recordTradeSettlementCte(Duration.ofNanos(System.nanoTime() - cteStartedAt));
@@ -106,7 +97,6 @@ public class WalletTradeSettlementAppender {
                 insertedSettlements[0],
                 updatedBuyers[0],
                 updatedSellers[0],
-                insertedOutboxes[0],
                 originalLockedCurrency,
                 refundCurrency,
                 dealCurrency,
@@ -119,8 +109,7 @@ public class WalletTradeSettlementAppender {
                     + event.getTradeId()
                     + ", insertedSettlements=" + outcome.insertedSettlements()
                     + ", updatedBuyers=" + outcome.updatedBuyers()
-                    + ", updatedSellers=" + outcome.updatedSellers()
-                    + ", insertedOutboxes=" + outcome.insertedOutboxes());
+                    + ", updatedSellers=" + outcome.updatedSellers());
         }
         return outcome;
     }
@@ -129,7 +118,6 @@ public class WalletTradeSettlementAppender {
             int insertedSettlements,
             int updatedBuyers,
             int updatedSellers,
-            int insertedOutboxes,
             int originalLockedCurrency,
             int refundCurrency,
             int dealCurrency,
@@ -142,8 +130,7 @@ public class WalletTradeSettlementAppender {
         boolean completed() {
             return insertedSettlements == 1
                     && updatedBuyers == 1
-                    && updatedSellers == 1
-                    && insertedOutboxes == 1;
+                    && updatedSellers == 1;
         }
     }
 }

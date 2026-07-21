@@ -1,14 +1,10 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.common.event.TradeExecutedEvent;
-import com.eap.common.event.WalletTradeSettledEvent;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
-import com.fasterxml.jackson.databind.ObjectMapper;
-import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -20,7 +16,6 @@ import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -38,50 +33,39 @@ class TradeExecutedListenerTest {
     private WalletMetrics walletMetrics;
 
     private TradeExecutedListener listener;
-    private ObjectMapper objectMapper;
 
     @BeforeEach
     void setUp() {
         TransactionStatus txStatus = new SimpleTransactionStatus();
         when(transactionManager.getTransaction(any())).thenReturn(txStatus);
-        objectMapper = new ObjectMapper();
-        objectMapper.registerModule(new JavaTimeModule());
         listener = new TradeExecutedListener(
                 settlementAppender,
-                objectMapper,
                 transactionManager,
                 walletMetrics);
     }
 
     @Test
-    void handleTradeExecuted_shouldAppendSettlementAndOutboxPayload() throws Exception {
+    void handleTradeExecuted_shouldAppendSettlement() {
         TradeExecutedEvent event = event();
-        when(settlementAppender.append(eq(event), anyString(), eq(event.getOccurredAt())))
+        when(settlementAppender.append(eq(event), eq(event.getOccurredAt())))
                 .thenReturn(new WalletTradeSettlementAppender.SettlementOutcome(
-                        1, 1, 1, 1, 1200, 100, 1100, event.getOccurredAt()));
+                        1, 1, 1, 1200, 100, 1100, event.getOccurredAt()));
 
         listener.handleTradeExecuted(event);
 
-        ArgumentCaptor<String> payloadCaptor = ArgumentCaptor.forClass(String.class);
-        verify(settlementAppender).append(eq(event), payloadCaptor.capture(), eq(event.getOccurredAt()));
-        WalletTradeSettledEvent payload =
-                objectMapper.readValue(payloadCaptor.getValue(), WalletTradeSettledEvent.class);
-        assertEquals(event.getTradeId(), payload.getTradeId());
-        assertEquals(1200, payload.getBuyerLockedCurrency());
-        assertEquals(100, payload.getBuyerRefundCurrency());
-        assertEquals(1100, payload.getSellerReceivedCurrency());
+        verify(settlementAppender).append(eq(event), eq(event.getOccurredAt()));
     }
 
     @Test
     void handleTradeExecuted_duplicateTrade_shouldSkipAsNoop() {
         TradeExecutedEvent event = event();
-        when(settlementAppender.append(eq(event), anyString(), eq(event.getOccurredAt())))
+        when(settlementAppender.append(eq(event), eq(event.getOccurredAt())))
                 .thenReturn(new WalletTradeSettlementAppender.SettlementOutcome(
-                        0, 0, 0, 0, 1200, 100, 1100, event.getOccurredAt()));
+                        0, 0, 0, 1200, 100, 1100, event.getOccurredAt()));
 
         listener.handleTradeExecuted(event);
 
-        verify(settlementAppender).append(eq(event), anyString(), eq(event.getOccurredAt()));
+        verify(settlementAppender).append(eq(event), eq(event.getOccurredAt()));
     }
 
     private TradeExecutedEvent event() {

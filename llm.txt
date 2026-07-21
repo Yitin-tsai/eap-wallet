@@ -60,14 +60,14 @@ in the same DB transaction to avoid dual-write problems:
 
 Poller 隨 Spring Boot 生命週期運行。若服務重啟：
 - 所有 PENDING 記錄仍在 PostgreSQL 中，重啟後 500ms 內自動補發
-- 可能導致重複發布（at-least-once）→ 下游服務需具備冪等性（matchEngine 用 `match:processed:{matchId}` SETNX 保護）
+- 可能導致重複發布（at-least-once）→ 下游服務需具備冪等性（MatchEngine completion markers 使用資料庫唯一鍵保護）
 
 ## RabbitMQ Listeners
 
 | Queue | Listener Class | Handles |
 |-------|---------------|---------|
 | wallet.orderSubmitted.queue | CreateOrderListener | Balance check + lock funds → write Outbox |
-| wallet.orderMatched.queue | MatchedOrderListener | Settle funds (unlock + transfer) |
+| wallet.tradeExecuted.queue | TradeExecutedListener | Settle matched trade → write WalletTradeSettled outbox |
 
 ## Key Files
 
