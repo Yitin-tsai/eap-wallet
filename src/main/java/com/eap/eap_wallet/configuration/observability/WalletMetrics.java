@@ -2,6 +2,7 @@ package com.eap.eap_wallet.configuration.observability;
 
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
@@ -9,6 +10,8 @@ import org.springframework.stereotype.Component;
 
 import java.time.Duration;
 import java.time.LocalDateTime;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 
 @Component
 public class WalletMetrics {
@@ -35,7 +38,12 @@ public class WalletMetrics {
     private final Counter tradeSettlementCompletedCounter;
     private final Counter tradeSettlementDuplicateSkippedCounter;
     private final Counter tradeSettlementFailedCounter;
+    private final Counter tradeSettlementBatchAppliedCounter;
+    private final Counter tradeSettlementBatchFallbackCounter;
+    private final Map<String, Counter> tradeSettlementBatchFallbackByReasonCounters = new ConcurrentHashMap<>();
+    private final DistributionSummary tradeSettlementBatchSizeSummary;
     private final Timer tradeSettlementProcessingTimer;
+    private final Timer tradeSettlementBatchTimer;
     private final Timer tradeSettlementSerializationTimer;
     private final Timer tradeSettlementTransactionTimer;
     private final Timer tradeSettlementCteTimer;
@@ -47,8 +55,10 @@ public class WalletMetrics {
     private final Timer tradeSettlementRelayConfirmTimer;
     private final Timer tradeSettlementRelayMarkSentTimer;
     private final Timer tradeSettlementRelayBatchTimer;
+    private final MeterRegistry registry;
 
     public WalletMetrics(MeterRegistry registry, OutboxRepository outboxRepository) {
+        this.registry = registry;
         this.orderSubmittedConsumedCounter = Counter.builder("eap_wallet_order_submitted_consumed_total")
                 .description("Total OrderSubmittedEvent messages consumed by wallet service")
                 .register(registry);
@@ -142,10 +152,23 @@ public class WalletMetrics {
         this.tradeSettlementFailedCounter = Counter.builder("eap_wallet_trade_settlement_failed_total")
                 .description("Total wallet trade settlement failures")
                 .register(registry);
+        this.tradeSettlementBatchAppliedCounter = Counter.builder("eap_wallet_trade_settlement_batch_applied_total")
+                .description("Total TradeExecutedEvent batches applied through the wallet batch settlement path")
+                .register(registry);
+        this.tradeSettlementBatchFallbackCounter = Counter.builder("eap_wallet_trade_settlement_batch_fallback_total")
+                .description("Total TradeExecutedEvent batches that fell back to single-event wallet settlement")
+                .register(registry);
+        this.tradeSettlementBatchSizeSummary = DistributionSummary.builder("eap_wallet_trade_settlement_batch_size")
+                .description("Number of TradeExecutedEvent messages per wallet settlement listener batch")
+                .register(registry);
         this.tradeSettlementProcessingTimer = stageTimer(
                 registry,
                 "eap_wallet_trade_settlement_processing_duration",
                 "Time spent processing TradeExecutedEvent in wallet service");
+        this.tradeSettlementBatchTimer = stageTimer(
+                registry,
+                "eap_wallet_trade_settlement_batch_duration",
+                "Time spent processing a TradeExecutedEvent batch in wallet service");
         this.tradeSettlementSerializationTimer = stageTimer(
                 registry,
                 "eap_wallet_trade_settlement_serialization_duration",
@@ -265,8 +288,16 @@ public class WalletMetrics {
         tradeSettlementConsumedCounter.increment();
     }
 
+    public void tradeSettlementConsumed(int count) {
+        tradeSettlementConsumedCounter.increment(count);
+    }
+
     public void tradeSettlementCompleted() {
         tradeSettlementCompletedCounter.increment();
+    }
+
+    public void tradeSettlementCompleted(int count) {
+        tradeSettlementCompletedCounter.increment(count);
     }
 
     public void tradeSettlementDuplicateSkipped() {
@@ -277,8 +308,28 @@ public class WalletMetrics {
         tradeSettlementFailedCounter.increment();
     }
 
+    public void tradeSettlementBatchApplied(int size) {
+        tradeSettlementBatchAppliedCounter.increment();
+        tradeSettlementBatchSizeSummary.record(size);
+    }
+
+    public void tradeSettlementBatchFallback(String reason, int size) {
+        tradeSettlementBatchFallbackCounter.increment();
+        tradeSettlementBatchFallbackByReasonCounters
+                .computeIfAbsent(reason, key -> Counter.builder("eap_wallet_trade_settlement_batch_fallback_reason_total")
+                        .tag("reason", key)
+                        .description("Total TradeExecutedEvent batches that fell back to single-event wallet settlement by reason")
+                        .register(registry))
+                .increment();
+        tradeSettlementBatchSizeSummary.record(size);
+    }
+
     public void recordTradeSettlementProcessing(Duration duration) {
         tradeSettlementProcessingTimer.record(duration);
+    }
+
+    public void recordTradeSettlementBatch(Duration duration) {
+        tradeSettlementBatchTimer.record(duration);
     }
 
     public void recordTradeSettlementSerialization(Duration duration) {
