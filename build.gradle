@@ -67,3 +67,10 @@ tasks.register('walletAmqpLoadTest', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.eap.eap_wallet.loadtest.WalletAmqpLoadGenerator'
 }
+
+tasks.register('walletDbCeilingProbe', JavaExec) {
+    group = 'verification'
+    description = 'Measure isolated Wallet trade settlement SQL ceiling without RabbitMQ or Spring listener overhead.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.eap.eap_wallet.loadtest.WalletDbCeilingProbe'
+}
