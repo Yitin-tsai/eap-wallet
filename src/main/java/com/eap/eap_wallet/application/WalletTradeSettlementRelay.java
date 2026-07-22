@@ -46,6 +46,7 @@ public class WalletTradeSettlementRelay {
     private final ObjectMapper objectMapper;
     private final WalletMetrics walletMetrics;
     private final int batchSize;
+    private final boolean batchConfirmEnabled;
     private final long confirmTimeoutMs;
     private final int maxAttempts;
     private final long initialBackoffMs;
@@ -58,6 +59,7 @@ public class WalletTradeSettlementRelay {
             ObjectMapper objectMapper,
             WalletMetrics walletMetrics,
             @Value("${eap.wallet.trade-settlement-relay.batch-size:500}") int batchSize,
+            @Value("${eap.wallet.trade-settlement-relay.batch-confirm-enabled:false}") boolean batchConfirmEnabled,
             @Value("${eap.wallet.trade-settlement-relay.confirm-timeout-ms:5000}") long confirmTimeoutMs,
             @Value("${eap.wallet.trade-settlement-relay.max-attempts:10}") int maxAttempts,
             @Value("${eap.wallet.trade-settlement-relay.initial-backoff-ms:1000}") long initialBackoffMs,
@@ -68,6 +70,7 @@ public class WalletTradeSettlementRelay {
         this.objectMapper = objectMapper;
         this.walletMetrics = walletMetrics;
         this.batchSize = batchSize;
+        this.batchConfirmEnabled = batchConfirmEnabled;
         this.confirmTimeoutMs = confirmTimeoutMs;
         this.maxAttempts = maxAttempts;
         this.initialBackoffMs = initialBackoffMs;
@@ -90,27 +93,35 @@ public class WalletTradeSettlementRelay {
             }
 
             List<PublishAttempt> attempts = publishBatch(pending);
+            if (attempts.isEmpty()) {
+                walletMetrics.recordTradeSettlementRelayBatch(Duration.between(batchStartedAt, Instant.now()));
+                return;
+            }
             long confirmationDeadlineNanos = System.nanoTime()
                     + TimeUnit.MILLISECONDS.toNanos(confirmTimeoutMs);
             List<PublishAttempt> confirmedAttempts = new ArrayList<>(attempts.size());
             boolean batchSucceeded = true;
-            for (PublishAttempt attempt : attempts) {
-                Instant confirmStartedAt = Instant.now();
-                try {
-                    awaitBrokerConfirmation(attempt.row(), attempt.correlationData(), confirmationDeadlineNanos);
-                    confirmedAttempts.add(attempt);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    walletMetrics.tradeSettlementRelayPublishFailed();
-                    log.warn("WalletTradeSettled relay interrupted while waiting for broker confirmation: tradeId={}",
-                            attempt.row().tradeId());
-                    return;
-                } catch (Exception e) {
-                    batchSucceeded = false;
-                    walletMetrics.tradeSettlementRelayPublishFailed();
-                    recordFailure(attempt.row(), e);
-                } finally {
-                    walletMetrics.recordTradeSettlementRelayConfirm(Duration.between(confirmStartedAt, Instant.now()));
+            if (batchConfirmEnabled) {
+                confirmedAttempts.addAll(attempts);
+            } else {
+                for (PublishAttempt attempt : attempts) {
+                    Instant confirmStartedAt = Instant.now();
+                    try {
+                        awaitBrokerConfirmation(attempt.row(), attempt.correlationData(), confirmationDeadlineNanos);
+                        confirmedAttempts.add(attempt);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        walletMetrics.tradeSettlementRelayPublishFailed();
+                        log.warn("WalletTradeSettled relay interrupted while waiting for broker confirmation: tradeId={}",
+                                attempt.row().tradeId());
+                        return;
+                    } catch (Exception e) {
+                        batchSucceeded = false;
+                        walletMetrics.tradeSettlementRelayPublishFailed();
+                        recordFailure(attempt.row(), e);
+                    } finally {
+                        walletMetrics.recordTradeSettlementRelayConfirm(Duration.between(confirmStartedAt, Instant.now()));
+                    }
                 }
             }
 
@@ -168,13 +179,50 @@ public class WalletTradeSettlementRelay {
 
     private List<PublishAttempt> publishBatch(List<SettlementRelayRow> pending) {
         List<PublishAttempt> attempts = new ArrayList<>(pending.size());
-        rabbitTemplate.invoke(operations -> {
-            for (SettlementRelayRow row : pending) {
-                attempts.add(publishOne(row, operations));
+        try {
+            rabbitTemplate.invoke(operations -> {
+                for (SettlementRelayRow row : pending) {
+                    attempts.add(publishOne(row, operations));
+                }
+                if (batchConfirmEnabled && !attempts.isEmpty()) {
+                    Instant confirmStartedAt = Instant.now();
+                    operations.waitForConfirmsOrDie(confirmTimeoutMs);
+                    Duration confirmDuration = Duration.between(confirmStartedAt, Instant.now());
+                    recordBatchConfirm(attempts.size(), confirmDuration);
+                    for (PublishAttempt attempt : attempts) {
+                        if (attempt.correlationData().getReturned() != null) {
+                            throw new AmqpException(
+                                    "Unroutable WalletTradeSettled event: tradeId=" + attempt.row().tradeId());
+                        }
+                    }
+                }
+                return null;
+            });
+        } catch (Exception e) {
+            if (attempts.isEmpty()) {
+                for (SettlementRelayRow row : pending) {
+                    walletMetrics.tradeSettlementRelayPublishFailed();
+                    recordFailure(row, e);
+                }
+                return List.of();
             }
-            return null;
-        });
+            for (PublishAttempt attempt : attempts) {
+                walletMetrics.tradeSettlementRelayPublishFailed();
+                recordFailure(attempt.row(), e);
+            }
+            return List.of();
+        }
         return attempts;
+    }
+
+    private void recordBatchConfirm(int confirmedCount, Duration confirmDuration) {
+        if (confirmedCount <= 0) {
+            return;
+        }
+        Duration perMessageDuration = confirmDuration.dividedBy(confirmedCount);
+        for (int i = 0; i < confirmedCount; i++) {
+            walletMetrics.recordTradeSettlementRelayConfirm(perMessageDuration);
+        }
     }
 
     private PublishAttempt publishOne(SettlementRelayRow row, RabbitOperations operations) {

@@ -26,6 +26,9 @@ public class TradeSettlementEntity {
     @Column(name = "settled_at", nullable = false)
     private LocalDateTime settledAt = LocalDateTime.now();
 
+    @Column(name = "inserted_at", nullable = false, insertable = false, updatable = false)
+    private LocalDateTime insertedAt;
+
     @Column(name = "buyer_id")
     private UUID buyerId;
 

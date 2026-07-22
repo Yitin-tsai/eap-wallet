@@ -31,6 +31,7 @@ eap:
       poll-interval-ms: 100
     trade-settlement-relay:
       batch-size: 500
+      batch-confirm-enabled: ${EAP_WALLET_TRADE_SETTLEMENT_BATCH_CONFIRM_ENABLED:false}
       poll-interval-ms: 100
 
 logging:

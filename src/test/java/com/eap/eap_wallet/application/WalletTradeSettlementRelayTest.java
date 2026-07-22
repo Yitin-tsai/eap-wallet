@@ -30,6 +30,7 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -62,6 +63,7 @@ class WalletTradeSettlementRelayTest {
                 objectMapper,
                 walletMetrics,
                 25,
+                false,
                 1000,
                 3,
                 1000,
@@ -106,9 +108,44 @@ class WalletTradeSettlementRelayTest {
         verify(walletMetrics).tradeSettlementRelayPublished();
     }
 
+    @Test
+    void batchConfirmEnabled_shouldWaitForChannelConfirmsBeforeMarkingSent() throws Exception {
+        WalletTradeSettlementRelay batchRelay = new WalletTradeSettlementRelay(
+                jdbcTemplate,
+                namedJdbcTemplate,
+                rabbitTemplate,
+                objectMapper,
+                walletMetrics,
+                25,
+                true,
+                1000,
+                3,
+                1000,
+                8000);
+        WalletTradeSettlementRelay.SettlementRelayRow first = pendingRow("trade-1");
+        WalletTradeSettlementRelay.SettlementRelayRow second = pendingRow("trade-2");
+        when(jdbcTemplate.query(
+                anyString(),
+                org.mockito.ArgumentMatchers.<RowMapper<WalletTradeSettlementRelay.SettlementRelayRow>>any(),
+                anyInt()))
+                .thenReturn(List.of(first, second), List.of());
+        when(namedJdbcTemplate.update(anyString(), any(MapSqlParameterSource.class))).thenReturn(2);
+
+        batchRelay.pollAndPublish();
+
+        verify(rabbitTemplate).waitForConfirmsOrDie(1000);
+        verify(namedJdbcTemplate).update(anyString(), org.mockito.ArgumentMatchers.<MapSqlParameterSource>argThat(params ->
+                params.hasValue("tradeIds") && params.getValue("tradeIds").equals(List.of("trade-1", "trade-2"))));
+        verify(walletMetrics, times(2)).tradeSettlementRelayPublished();
+    }
+
     private WalletTradeSettlementRelay.SettlementRelayRow pendingRow() {
+        return pendingRow("trade-1");
+    }
+
+    private WalletTradeSettlementRelay.SettlementRelayRow pendingRow(String tradeId) {
         return new WalletTradeSettlementRelay.SettlementRelayRow(
-                "trade-1",
+                tradeId,
                 1001,
                 LocalDateTime.now(),
                 UUID.randomUUID(),
