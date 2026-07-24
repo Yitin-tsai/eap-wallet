@@ -65,6 +65,9 @@ public class TradeExecutedListener {
                             return result;
                         });
                 walletMetrics.tradeSettlementCompleted(events.size());
+                if (outcome != null && outcome.existingSettlements() > 0) {
+                    walletMetrics.tradeSettlementDuplicateSkipped(outcome.existingSettlements());
+                }
                 walletMetrics.tradeSettlementBatchApplied(events.size());
                 log.debug("Trade wallet settlement batch completed: size={}", events.size());
             } catch (BatchSettlementNotAppliedException e) {

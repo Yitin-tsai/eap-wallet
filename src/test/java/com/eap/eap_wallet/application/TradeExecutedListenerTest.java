@@ -88,6 +88,23 @@ class TradeExecutedListenerTest {
     }
 
     @Test
+    void handleTradeExecutedBatch_existingSettlement_shouldRemainBatchNoopForDuplicate() {
+        TradeExecutedEvent first = event("trade-1");
+        TradeExecutedEvent second = event("trade-2");
+        when(settlementAppender.appendBatch(List.of(first, second)))
+                .thenReturn(new WalletTradeSettlementAppender.BatchSettlementOutcome(
+                        2, 1, 1, 1, 1));
+
+        listener.handleTradeExecutedBatch(List.of(first, second));
+
+        verify(settlementAppender).appendBatch(List.of(first, second));
+        verify(settlementAppender, never()).append(any(), any());
+        verify(walletMetrics).tradeSettlementCompleted(2);
+        verify(walletMetrics).tradeSettlementDuplicateSkipped(1);
+        verify(walletMetrics).tradeSettlementBatchApplied(2);
+    }
+
+    @Test
     void handleTradeExecutedBatch_overlappingUsers_shouldFallbackToSingleSettlements() {
         UUID sharedBuyer = UUID.randomUUID();
         TradeExecutedEvent first = event("trade-1");

@@ -40,16 +40,9 @@ public class WalletDbCeilingProbe {
     private static final String SETTLEMENT_SQL = """
             WITH settlement AS (
                 INSERT INTO wallet_service.trade_settlements
-                    (trade_id, legacy_match_id, settled_at,
-                     buyer_id, seller_id, buyer_order_id, seller_order_id,
-                     deal_price, quantity, buyer_locked_currency, buyer_refund_currency,
-                     seller_received_currency, event_status, attempt_count,
-                     next_retry_at, updated_at)
+                    (trade_id, legacy_match_id, settled_at)
                 VALUES
-                    (?, ?, ?,
-                     ?, ?, ?, ?,
-                     ?, ?, ?, ?,
-                     ?, 'PENDING', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    (?, ?, ?)
                 ON CONFLICT (trade_id) DO NOTHING
                 RETURNING trade_id
             ),
@@ -240,24 +233,15 @@ public class WalletDbCeilingProbe {
         statement.setString(1, tradeId);
         statement.setLong(2, sequence);
         statement.setTimestamp(3, Timestamp.valueOf(LocalDateTime.now()));
-        statement.setObject(4, buyerId(sequence));
-        statement.setObject(5, sellerId(sequence));
-        statement.setObject(6, uuid(sequence, 3));
-        statement.setObject(7, uuid(sequence, 4));
-        statement.setInt(8, dealPrice);
+        statement.setInt(4, originalLockedCurrency);
+        statement.setInt(5, refundCurrency);
+        statement.setInt(6, quantity);
+        statement.setObject(7, buyerId(sequence));
+        statement.setInt(8, originalLockedCurrency);
         statement.setInt(9, quantity);
-        statement.setInt(10, originalLockedCurrency);
-        statement.setInt(11, refundCurrency);
-        statement.setInt(12, dealCurrency);
-        statement.setInt(13, originalLockedCurrency);
-        statement.setInt(14, refundCurrency);
-        statement.setInt(15, quantity);
-        statement.setObject(16, buyerId(sequence));
-        statement.setInt(17, originalLockedCurrency);
-        statement.setInt(18, quantity);
-        statement.setInt(19, dealCurrency);
-        statement.setObject(20, sellerId(sequence));
-        statement.setInt(21, quantity);
+        statement.setInt(10, dealCurrency);
+        statement.setObject(11, sellerId(sequence));
+        statement.setInt(12, quantity);
     }
 
     private static UUID buyerId(long sequence) {

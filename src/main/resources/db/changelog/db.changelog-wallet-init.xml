@@ -252,4 +252,26 @@
         </addColumn>
     </changeSet>
 
+    <changeSet id="wallet-018" author="eap">
+        <comment>Retire WalletTradeSettled relay state from trade_settlements hot path</comment>
+        <sql>
+            DROP INDEX IF EXISTS wallet_service.idx_trade_settlements_pending_event;
+            ALTER TABLE wallet_service.trade_settlements
+                DROP COLUMN IF EXISTS buyer_id,
+                DROP COLUMN IF EXISTS seller_id,
+                DROP COLUMN IF EXISTS buyer_order_id,
+                DROP COLUMN IF EXISTS seller_order_id,
+                DROP COLUMN IF EXISTS deal_price,
+                DROP COLUMN IF EXISTS quantity,
+                DROP COLUMN IF EXISTS buyer_locked_currency,
+                DROP COLUMN IF EXISTS buyer_refund_currency,
+                DROP COLUMN IF EXISTS seller_received_currency,
+                DROP COLUMN IF EXISTS event_status,
+                DROP COLUMN IF EXISTS attempt_count,
+                DROP COLUMN IF EXISTS next_retry_at,
+                DROP COLUMN IF EXISTS last_error,
+                DROP COLUMN IF EXISTS updated_at;
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>

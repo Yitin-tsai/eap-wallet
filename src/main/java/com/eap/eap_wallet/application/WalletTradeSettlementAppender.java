@@ -21,35 +21,20 @@ import java.util.UUID;
 @RequiredArgsConstructor
 public class WalletTradeSettlementAppender {
 
-    private static final String APPEND_BATCH_SQL = """
+    static final String APPEND_BATCH_SQL = """
             WITH input(trade_id, legacy_match_id, settled_at,
-                       buyer_id, seller_id, buyer_order_id, seller_order_id,
-                       deal_price, quantity, original_locked_currency, refund_currency,
+                       buyer_id, seller_id, quantity, original_locked_currency, refund_currency,
                        deal_currency) AS (
                 SELECT *
                 FROM unnest(?::varchar[], ?::integer[], ?::timestamp[],
-                            ?::uuid[], ?::uuid[], ?::uuid[], ?::uuid[],
-                            ?::integer[], ?::integer[], ?::integer[], ?::integer[],
-                            ?::integer[])
-            ),
-            existing_settlements AS (
-                SELECT COUNT(*) AS count
-                FROM wallet_service.trade_settlements existing
-                JOIN input ON input.trade_id = existing.trade_id
+                            ?::uuid[], ?::uuid[], ?::integer[], ?::integer[],
+                            ?::integer[], ?::integer[])
             ),
             settlement AS (
                 INSERT INTO wallet_service.trade_settlements
-                    (trade_id, legacy_match_id, settled_at,
-                     buyer_id, seller_id, buyer_order_id, seller_order_id,
-                     deal_price, quantity, buyer_locked_currency, buyer_refund_currency,
-                     seller_received_currency, event_status, attempt_count,
-                     next_retry_at, updated_at)
-                SELECT trade_id, legacy_match_id, settled_at,
-                       buyer_id, seller_id, buyer_order_id, seller_order_id,
-                       deal_price, quantity, original_locked_currency, refund_currency,
-                       deal_currency, 'PENDING', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    (trade_id, legacy_match_id, settled_at)
+                SELECT trade_id, legacy_match_id, settled_at
                 FROM input
-                WHERE (SELECT count FROM existing_settlements) = 0
                 ON CONFLICT (trade_id) DO NOTHING
                 RETURNING trade_id
             ),
@@ -79,7 +64,7 @@ public class WalletTradeSettlementAppender {
                 RETURNING 1
             )
             SELECT
-                (SELECT count FROM existing_settlements) AS existing_settlements,
+                (SELECT COUNT(*) FROM input) - (SELECT COUNT(*) FROM settlement) AS existing_settlements,
                 (SELECT COUNT(*) FROM settlement) AS inserted_settlements,
                 (SELECT COUNT(*) FROM buyer_update) AS updated_buyers,
                 (SELECT COUNT(*) FROM seller_update) AS updated_sellers
@@ -103,16 +88,9 @@ public class WalletTradeSettlementAppender {
             jdbcTemplate.query("""
                 WITH settlement AS (
                     INSERT INTO wallet_service.trade_settlements
-                        (trade_id, legacy_match_id, settled_at,
-                         buyer_id, seller_id, buyer_order_id, seller_order_id,
-                         deal_price, quantity, buyer_locked_currency, buyer_refund_currency,
-                         seller_received_currency, event_status, attempt_count,
-                         next_retry_at, updated_at)
+                        (trade_id, legacy_match_id, settled_at)
                     VALUES
-                        (:tradeId, :legacyMatchId, :settledAt,
-                         :buyerId, :sellerId, :buyerOrderId, :sellerOrderId,
-                         :dealPrice, :quantity, :originalLockedCurrency, :refundCurrency,
-                         :dealCurrency, 'PENDING', 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        (:tradeId, :legacyMatchId, :settledAt)
                     ON CONFLICT (trade_id) DO NOTHING
                     RETURNING trade_id
                 ),
@@ -149,9 +127,6 @@ public class WalletTradeSettlementAppender {
                 .addValue("settledAt", settledAt)
                 .addValue("buyerId", event.getBuyerId())
                 .addValue("sellerId", event.getSellerId())
-                .addValue("buyerOrderId", event.getBuyerOrderId())
-                .addValue("sellerOrderId", event.getSellerOrderId())
-                .addValue("dealPrice", event.getDealPrice())
                 .addValue("originalLockedCurrency", originalLockedCurrency)
                 .addValue("refundCurrency", refundCurrency)
                 .addValue("dealCurrency", dealCurrency)
@@ -176,7 +151,7 @@ public class WalletTradeSettlementAppender {
             return outcome;
         }
         if (!outcome.completed()) {
-            throw new IllegalStateException("Wallet trade settlement did not update both wallets and outbox: tradeId="
+            throw new IllegalStateException("Wallet trade settlement did not persist settlement and update both wallets: tradeId="
                     + event.getTradeId()
                     + ", insertedSettlements=" + outcome.insertedSettlements()
                     + ", updatedBuyers=" + outcome.updatedBuyers()
@@ -198,9 +173,6 @@ public class WalletTradeSettlementAppender {
                 Array settledAts = null;
                 Array buyerIds = null;
                 Array sellerIds = null;
-                Array buyerOrderIds = null;
-                Array sellerOrderIds = null;
-                Array dealPrices = null;
                 Array quantities = null;
                 Array originalLockedCurrencies = null;
                 Array refundCurrencies = null;
@@ -212,9 +184,6 @@ public class WalletTradeSettlementAppender {
                     settledAts = connection.createArrayOf("timestamp", arrays.settledAts());
                     buyerIds = connection.createArrayOf("uuid", arrays.buyerIds());
                     sellerIds = connection.createArrayOf("uuid", arrays.sellerIds());
-                    buyerOrderIds = connection.createArrayOf("uuid", arrays.buyerOrderIds());
-                    sellerOrderIds = connection.createArrayOf("uuid", arrays.sellerOrderIds());
-                    dealPrices = connection.createArrayOf("integer", arrays.dealPrices());
                     quantities = connection.createArrayOf("integer", arrays.quantities());
                     originalLockedCurrencies = connection.createArrayOf("integer", arrays.originalLockedCurrencies());
                     refundCurrencies = connection.createArrayOf("integer", arrays.refundCurrencies());
@@ -225,13 +194,10 @@ public class WalletTradeSettlementAppender {
                     statement.setArray(3, settledAts);
                     statement.setArray(4, buyerIds);
                     statement.setArray(5, sellerIds);
-                    statement.setArray(6, buyerOrderIds);
-                    statement.setArray(7, sellerOrderIds);
-                    statement.setArray(8, dealPrices);
-                    statement.setArray(9, quantities);
-                    statement.setArray(10, originalLockedCurrencies);
-                    statement.setArray(11, refundCurrencies);
-                    statement.setArray(12, dealCurrencies);
+                    statement.setArray(6, quantities);
+                    statement.setArray(7, originalLockedCurrencies);
+                    statement.setArray(8, refundCurrencies);
+                    statement.setArray(9, dealCurrencies);
 
                     try (ResultSet rs = statement.executeQuery()) {
                         if (!rs.next()) {
@@ -250,9 +216,6 @@ public class WalletTradeSettlementAppender {
                     freeQuietly(settledAts);
                     freeQuietly(buyerIds);
                     freeQuietly(sellerIds);
-                    freeQuietly(buyerOrderIds);
-                    freeQuietly(sellerOrderIds);
-                    freeQuietly(dealPrices);
                     freeQuietly(quantities);
                     freeQuietly(originalLockedCurrencies);
                     freeQuietly(refundCurrencies);
@@ -271,9 +234,6 @@ public class WalletTradeSettlementAppender {
         Timestamp[] settledAts = new Timestamp[size];
         UUID[] buyerIds = new UUID[size];
         UUID[] sellerIds = new UUID[size];
-        UUID[] buyerOrderIds = new UUID[size];
-        UUID[] sellerOrderIds = new UUID[size];
-        Integer[] dealPrices = new Integer[size];
         Integer[] quantities = new Integer[size];
         Integer[] originalLockedCurrencies = new Integer[size];
         Integer[] refundCurrencies = new Integer[size];
@@ -292,9 +252,6 @@ public class WalletTradeSettlementAppender {
             settledAts[i] = Timestamp.valueOf(settledAt);
             buyerIds[i] = event.getBuyerId();
             sellerIds[i] = event.getSellerId();
-            buyerOrderIds[i] = event.getBuyerOrderId();
-            sellerOrderIds[i] = event.getSellerOrderId();
-            dealPrices[i] = event.getDealPrice();
             quantities[i] = event.getQuantity();
             originalLockedCurrencies[i] = originalLockedCurrency;
             refundCurrencies[i] = refundCurrency;
@@ -306,9 +263,6 @@ public class WalletTradeSettlementAppender {
                 settledAts,
                 buyerIds,
                 sellerIds,
-                buyerOrderIds,
-                sellerOrderIds,
-                dealPrices,
                 quantities,
                 originalLockedCurrencies,
                 refundCurrencies,
@@ -358,10 +312,9 @@ public class WalletTradeSettlementAppender {
 
         boolean completed() {
             return requestedSettlements > 0
-                    && existingSettlements == 0
-                    && insertedSettlements == requestedSettlements
-                    && updatedBuyers == requestedSettlements
-                    && updatedSellers == requestedSettlements;
+                    && existingSettlements + insertedSettlements == requestedSettlements
+                    && updatedBuyers == insertedSettlements
+                    && updatedSellers == insertedSettlements;
         }
     }
 
@@ -371,9 +324,6 @@ public class WalletTradeSettlementAppender {
             Timestamp[] settledAts,
             UUID[] buyerIds,
             UUID[] sellerIds,
-            UUID[] buyerOrderIds,
-            UUID[] sellerOrderIds,
-            Integer[] dealPrices,
             Integer[] quantities,
             Integer[] originalLockedCurrencies,
             Integer[] refundCurrencies,
