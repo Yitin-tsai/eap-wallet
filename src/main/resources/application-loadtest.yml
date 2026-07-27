@@ -24,7 +24,7 @@ eap:
       trade-executed:
         concurrency: 12
         batch-size: 50
-        receive-timeout-ms: 25
+        receive-timeout-ms: 75
     outbox-relay:
       batch-size: 500
       publish-concurrency: 1
