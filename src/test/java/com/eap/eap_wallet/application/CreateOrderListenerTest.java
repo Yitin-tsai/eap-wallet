@@ -1,10 +1,8 @@
 package com.eap.eap_wallet.application;
 
-import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.repository.OrderSubmissionIdempotencyRepository;
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
-import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
 import com.eap.common.event.OrderSubmittedEvent;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -13,9 +11,9 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.dao.DataIntegrityViolationException;
-import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.TransactionStatus;
@@ -25,7 +23,10 @@ import java.time.LocalDateTime;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
+import static org.mockito.ArgumentMatchers.contains;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.*;
 
 @ExtendWith(MockitoExtension.class)
@@ -35,7 +36,7 @@ class CreateOrderListenerTest {
     private WalletRepository walletRepository;
 
     @Mock
-    private OutboxRepository outboxRepository;
+    private JdbcTemplate jdbcTemplate;
 
     @Mock
     private OrderSubmissionIdempotencyRepository orderSubmissionIdempotencyRepository;
@@ -70,7 +71,7 @@ class CreateOrderListenerTest {
         createOrderListener = new CreateOrderListener();
         // Inject dependencies via reflection
         setField(createOrderListener, "walletRepository", walletRepository);
-        setField(createOrderListener, "outboxRepository", outboxRepository);
+        setField(createOrderListener, "jdbcTemplate", jdbcTemplate);
         setField(createOrderListener, "orderSubmissionIdempotencyRepository", orderSubmissionIdempotencyRepository);
         setField(createOrderListener, "objectMapper", objectMapper);
         setField(createOrderListener, "transactionManager", transactionManager);
@@ -107,9 +108,11 @@ class CreateOrderListenerTest {
         verify(walletRepository, never()).findByUserId(testUserId);
         verify(walletRepository, never()).save(any(WalletEntity.class));
 
-        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
-        verify(outboxRepository).save(outboxCaptor.capture());
-        assertEquals("OrderConfirmedEvent", outboxCaptor.getValue().getEventType());
+        verify(jdbcTemplate).update(
+                contains("INSERT INTO wallet_service.outbox"),
+                eq("OrderConfirmedEvent"),
+                anyString(),
+                anyString());
     }
 
     @Test
@@ -134,7 +137,11 @@ class CreateOrderListenerTest {
         verify(walletRepository, never()).findByUserId(testUserId);
         verify(walletRepository, times(1)).reserveCurrencyForBuy(testUserId, 10000);
         verify(walletRepository, never()).save(any(WalletEntity.class));
-        verify(outboxRepository, times(1)).save(any(OutboxEntity.class));
+        verify(jdbcTemplate, times(1)).update(
+                contains("INSERT INTO wallet_service.outbox"),
+                eq("OrderConfirmedEvent"),
+                anyString(),
+                anyString());
         verify(orderSubmissionIdempotencyRepository, times(2))
                 .claimOrderSubmission(testOrderId, testUserId);
 
@@ -157,9 +164,11 @@ class CreateOrderListenerTest {
 
         createOrderListener.onOrderSubmitted(event);
 
-        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
-        verify(outboxRepository).save(outboxCaptor.capture());
-        assertEquals("OrderFailedEvent", outboxCaptor.getValue().getEventType());
+        verify(jdbcTemplate).update(
+                contains("INSERT INTO wallet_service.outbox"),
+                eq("OrderFailedEvent"),
+                anyString(),
+                anyString());
 
         verify(walletRepository).reserveCurrencyForBuy(testUserId, 150000);
         verify(walletRepository, never()).save(any(WalletEntity.class));
@@ -182,9 +191,11 @@ class CreateOrderListenerTest {
 
         createOrderListener.onOrderSubmitted(event);
 
-        ArgumentCaptor<OutboxEntity> outboxCaptor = ArgumentCaptor.forClass(OutboxEntity.class);
-        verify(outboxRepository).save(outboxCaptor.capture());
-        assertEquals("OrderFailedEvent", outboxCaptor.getValue().getEventType());
+        verify(jdbcTemplate).update(
+                contains("INSERT INTO wallet_service.outbox"),
+                eq("OrderFailedEvent"),
+                anyString(),
+                anyString());
 
         verify(walletRepository).reserveAmountForSell(testUserId, 150);
         verify(walletRepository, never()).save(any(WalletEntity.class));

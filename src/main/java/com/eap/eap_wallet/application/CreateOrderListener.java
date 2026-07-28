@@ -3,16 +3,15 @@ package com.eap.eap_wallet.application;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.eap.eap_wallet.configuration.repository.OrderSubmissionIdempotencyRepository;
 import com.eap.eap_wallet.configuration.repository.WalletRepository;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
-import com.eap.eap_wallet.domain.entity.OutboxEntity;
 import com.eap.common.event.OrderSubmittedEvent;
 import com.eap.common.event.OrderConfirmedEvent;
 import com.eap.common.event.OrderFailedEvent;
@@ -33,7 +32,7 @@ public class CreateOrderListener {
     private WalletRepository walletRepository;
 
     @Autowired
-    private OutboxRepository outboxRepository;
+    private JdbcTemplate jdbcTemplate;
 
     @Autowired
     private OrderSubmissionIdempotencyRepository orderSubmissionIdempotencyRepository;
@@ -100,8 +99,9 @@ public class CreateOrderListener {
                                     .build();
                             long outboxWriteStartedAt = System.nanoTime();
                             try {
-                                String payload = objectMapper.writeValueAsString(orderConfirmedEvent);
-                                outboxRepository.save(new OutboxEntity("OrderConfirmedEvent", ORDER_CONFIRMED_KEY, payload));
+                                insertOutbox("OrderConfirmedEvent",
+                                        ORDER_CONFIRMED_KEY,
+                                        objectMapper.writeValueAsString(orderConfirmedEvent));
                             } finally {
                                 walletMetrics.recordOrderSubmittedOutboxWrite(
                                         Duration.ofNanos(System.nanoTime() - outboxWriteStartedAt));
@@ -196,8 +196,7 @@ public class CreateOrderListener {
         try {
             long outboxWriteStartedAt = System.nanoTime();
             try {
-                String payload = objectMapper.writeValueAsString(failedEvent);
-                outboxRepository.save(new OutboxEntity("OrderFailedEvent", ORDER_FAILED_KEY, payload));
+                insertOutbox("OrderFailedEvent", ORDER_FAILED_KEY, objectMapper.writeValueAsString(failedEvent));
             } finally {
                 walletMetrics.recordOrderSubmittedOutboxWrite(
                         Duration.ofNanos(System.nanoTime() - outboxWriteStartedAt));
@@ -217,5 +216,16 @@ public class CreateOrderListener {
             walletMetrics.recordOrderSubmittedIdempotencyClaim(
                     Duration.ofNanos(System.nanoTime() - claimStartedAt));
         }
+    }
+
+    private void insertOutbox(String eventType, String routingKey, String payload) {
+        jdbcTemplate.update("""
+                INSERT INTO wallet_service.outbox
+                    (event_type, routing_key, payload, status,
+                     created_at, attempt_count, next_retry_at, updated_at)
+                VALUES
+                    (?, ?, ?, 'PENDING',
+                     CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                """, eventType, routingKey, payload);
     }
 }
