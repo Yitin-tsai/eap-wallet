@@ -24,6 +24,7 @@ public class WalletMetrics {
     private final Timer orderSubmittedIdempotencyClaimTimer;
     private final Timer orderSubmittedWalletLookupTimer;
     private final Timer orderSubmittedOutboxWriteTimer;
+    private final Timer orderSubmittedReservationCteTimer;
     private final Counter outboxPublishedCounter;
     private final Counter outboxPublishFailedCounter;
     private final Counter outboxRetryScheduledCounter;
@@ -79,6 +80,10 @@ public class WalletMetrics {
                 registry,
                 "eap_wallet_order_submitted_outbox_write_duration",
                 "Time spent serializing and persisting the wallet result outbox event");
+        this.orderSubmittedReservationCteTimer = stageTimer(
+                registry,
+                "eap_wallet_order_submitted_reservation_cte_duration",
+                "Time spent executing the Wallet OrderSubmitted reservation CTE");
 
         Gauge.builder("eap_wallet_outbox_pending", outboxRepository, repo -> repo.countByStatus("PENDING"))
                 .description("Current number of pending wallet outbox records")
@@ -200,6 +205,10 @@ public class WalletMetrics {
 
     public void recordOrderSubmittedOutboxWrite(Duration duration) {
         orderSubmittedOutboxWriteTimer.record(duration);
+    }
+
+    public void recordOrderSubmittedReservationCte(Duration duration) {
+        orderSubmittedReservationCteTimer.record(duration);
     }
 
     public void outboxPublished() {

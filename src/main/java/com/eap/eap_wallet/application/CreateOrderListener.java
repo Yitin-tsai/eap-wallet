@@ -2,15 +2,13 @@ package com.eap.eap_wallet.application;
 
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.dao.CannotAcquireLockException;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.orm.ObjectOptimisticLockingFailureException;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
-import com.eap.eap_wallet.configuration.repository.OrderSubmissionIdempotencyRepository;
-import com.eap.eap_wallet.configuration.repository.WalletRepository;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import com.eap.common.event.OrderSubmittedEvent;
 import com.eap.common.event.OrderConfirmedEvent;
@@ -29,13 +27,7 @@ import java.time.LocalDateTime;
 public class CreateOrderListener {
 
     @Autowired
-    private WalletRepository walletRepository;
-
-    @Autowired
     private JdbcTemplate jdbcTemplate;
-
-    @Autowired
-    private OrderSubmissionIdempotencyRepository orderSubmissionIdempotencyRepository;
 
     @Autowired
     private ObjectMapper objectMapper;
@@ -64,67 +56,41 @@ public class CreateOrderListener {
                 long transactionStartedAt = System.nanoTime();
                 try {
                     txTemplate.executeWithoutResult(status -> {
-                        if (!claimOrderSubmitted(event)) {
+                        ReservationPayloads payloads = reservationPayloads(event);
+                        ReservationOutcome outcome = reserveOrderSubmitted(event, payloads);
+                        if (outcome.claimed() == 0) {
                             walletMetrics.orderSubmittedDuplicateSkipped();
                             log.info("Duplicate OrderSubmittedEvent skipped: orderId={}", event.getOrderId());
                             return;
                         }
-
-                        String orderType = event.getOrderType();
-                        if ("BUY".equals(orderType)) {
-                            int requiredCurrency = event.getAmount() * event.getPrice();
-                            if (!reserveBuy(event, requiredCurrency)) {
-                                return;
-                            }
-                        } else if ("SELL".equals(orderType)) {
-                            if (!reserveSell(event)) {
-                                return;
-                            }
-                        } else {
-                            log.error("未知的訂單類型: {}", orderType);
-                            sendOrderFailedEvent(event, "訂單類型錯誤");
+                        if (outcome.outboxInserted() != 1) {
+                            throw new IllegalStateException("Wallet reservation did not insert exactly one outbox row: "
+                                    + outcome);
+                        }
+                        if (outcome.reserved() == 1) {
+                            log.info("訂單處理完成: orderId={}", event.getOrderId());
                             return;
                         }
-
-                        try {
-                            OrderConfirmedEvent orderConfirmedEvent = OrderConfirmedEvent.builder()
-                                    .orderId(event.getOrderId())
-                                    .userId(event.getUserId())
-                                    .marketId(event.getMarketId())
-                                    .marketSequence(event.getMarketSequence())
-                                    .price(event.getPrice())
-                                    .amount(event.getAmount())
-                                    .orderType(event.getOrderType())
-                                    .createdAt(event.getCreatedAt())
-                                    .build();
-                            long outboxWriteStartedAt = System.nanoTime();
-                            try {
-                                insertOutbox("OrderConfirmedEvent",
-                                        ORDER_CONFIRMED_KEY,
-                                        objectMapper.writeValueAsString(orderConfirmedEvent));
-                            } finally {
-                                walletMetrics.recordOrderSubmittedOutboxWrite(
-                                        Duration.ofNanos(System.nanoTime() - outboxWriteStartedAt));
-                            }
-                        } catch (JsonProcessingException e) {
-                            throw new RuntimeException("Failed to serialize OrderConfirmedEvent", e);
+                        if (outcome.walletExists() == 0) {
+                            log.warn("找不到使用者錢包: {}", event.getUserId());
+                        } else {
+                            log.warn("資產不足: orderId={}, userId={}, reason={}",
+                                    event.getOrderId(), event.getUserId(), payloads.insufficientReason());
                         }
-
-                        log.info("訂單處理完成: orderId={}", event.getOrderId());
                     });
                     break; // success, exit retry loop
                 } catch (DataIntegrityViolationException e) {
                     log.error("OrderSubmittedEvent idempotency claim failed unexpectedly: orderId={}",
                             event.getOrderId(), e);
                     throw e;
-                } catch (ObjectOptimisticLockingFailureException e) {
+                } catch (CannotAcquireLockException e) {
                     if (attempt == maxRetries) {
-                        log.error("訂單處理失敗，optimistic lock 衝突達 {} 次上限: orderId={}, userId={}",
+                        log.error("訂單處理失敗，錢包保留交易衝突達 {} 次上限: orderId={}, userId={}",
                                 maxRetries, event.getOrderId(), event.getUserId(), e);
                         throw e;
                     }
                     walletMetrics.optimisticLockRetry();
-                    log.warn("Optimistic lock 衝突，重試 {}/{}: orderId={}, userId={}",
+                    log.warn("錢包保留交易衝突，重試 {}/{}: orderId={}, userId={}",
                             attempt, maxRetries, event.getOrderId(), event.getUserId());
                 } finally {
                     walletMetrics.recordOrderSubmittedTransaction(
@@ -136,96 +102,154 @@ public class CreateOrderListener {
         }
     }
 
-    private boolean reserveBuy(OrderSubmittedEvent event, int requiredCurrency) {
-        long walletUpdateStartedAt = System.nanoTime();
-        int updated;
+    private ReservationPayloads reservationPayloads(OrderSubmittedEvent event) {
         try {
-            updated = walletRepository.reserveCurrencyForBuy(event.getUserId(), requiredCurrency);
-        } finally {
-            walletMetrics.recordOrderSubmittedWalletLookup(
-                    Duration.ofNanos(System.nanoTime() - walletUpdateStartedAt));
+            String orderType = event.getOrderType();
+            if (!"BUY".equals(orderType) && !"SELL".equals(orderType)) {
+                log.error("未知的訂單類型: {}", orderType);
+                return ReservationPayloads.invalidType(
+                        objectMapper.writeValueAsString(orderFailedEvent(event, "訂單類型錯誤")));
+            }
+
+            OrderConfirmedEvent orderConfirmedEvent = OrderConfirmedEvent.builder()
+                    .orderId(event.getOrderId())
+                    .userId(event.getUserId())
+                    .marketId(event.getMarketId())
+                    .marketSequence(event.getMarketSequence())
+                    .price(event.getPrice())
+                    .amount(event.getAmount())
+                    .orderType(event.getOrderType())
+                    .createdAt(event.getCreatedAt())
+                    .build();
+            String insufficientReason = "BUY".equals(orderType) ? "餘額不足" : "可用電量不足";
+            return new ReservationPayloads(
+                    objectMapper.writeValueAsString(orderConfirmedEvent),
+                    objectMapper.writeValueAsString(orderFailedEvent(event, insufficientReason)),
+                    objectMapper.writeValueAsString(orderFailedEvent(event, "錢包不存在")),
+                    insufficientReason,
+                    false);
+        } catch (JsonProcessingException e) {
+            throw new RuntimeException("Failed to serialize wallet reservation event", e);
         }
-        if (updated == 1) {
-            log.info("買單鎖定貨幣: userId={}, 鎖定金額={}", event.getUserId(), requiredCurrency);
-            return true;
-        }
-        sendReservationFailed(event, "餘額不足");
-        return false;
     }
 
-    private boolean reserveSell(OrderSubmittedEvent event) {
-        long walletUpdateStartedAt = System.nanoTime();
-        int updated;
-        try {
-            updated = walletRepository.reserveAmountForSell(event.getUserId(), event.getAmount());
-        } finally {
-            walletMetrics.recordOrderSubmittedWalletLookup(
-                    Duration.ofNanos(System.nanoTime() - walletUpdateStartedAt));
-        }
-        if (updated == 1) {
-            log.info("賣單鎖定電量: userId={}, 鎖定數量={}", event.getUserId(), event.getAmount());
-            return true;
-        }
-        sendReservationFailed(event, "可用電量不足");
-        return false;
-    }
-
-    private void sendReservationFailed(OrderSubmittedEvent event, String insufficientReason) {
-        if (!walletRepository.existsByUserId(event.getUserId())) {
-            log.warn("找不到使用者錢包: {}", event.getUserId());
-            sendOrderFailedEvent(event, "錢包不存在");
-            return;
-        }
-        log.warn("資產不足: orderId={}, userId={}, reason={}",
-                event.getOrderId(), event.getUserId(), insufficientReason);
-        sendOrderFailedEvent(event, insufficientReason);
-    }
-
-    private void sendOrderFailedEvent(OrderSubmittedEvent originalEvent, String reason) {
+    private OrderFailedEvent orderFailedEvent(OrderSubmittedEvent originalEvent, String reason) {
         String failureType = reason.contains("餘額") ? "INSUFFICIENT_BALANCE" :
-                           reason.contains("電量") ? "INSUFFICIENT_AMOUNT" : "WALLET_NOT_FOUND";
+                           reason.contains("電量") ? "INSUFFICIENT_AMOUNT" :
+                           reason.contains("類型") ? "INVALID_ORDER_TYPE" : "WALLET_NOT_FOUND";
 
-        OrderFailedEvent failedEvent = OrderFailedEvent.builder()
+        return OrderFailedEvent.builder()
                 .orderId(originalEvent.getOrderId())
                 .userId(originalEvent.getUserId())
                 .reason(reason)
                 .failureType(failureType)
                 .failedAt(LocalDateTime.now())
                 .build();
-
-        try {
-            long outboxWriteStartedAt = System.nanoTime();
-            try {
-                insertOutbox("OrderFailedEvent", ORDER_FAILED_KEY, objectMapper.writeValueAsString(failedEvent));
-            } finally {
-                walletMetrics.recordOrderSubmittedOutboxWrite(
-                        Duration.ofNanos(System.nanoTime() - outboxWriteStartedAt));
-            }
-        } catch (JsonProcessingException e) {
-            throw new RuntimeException("Failed to serialize OrderFailedEvent", e);
-        }
-        log.info("已發送訂單失敗通知: {} - {}", originalEvent.getOrderId(), reason);
     }
 
-    private boolean claimOrderSubmitted(OrderSubmittedEvent event) {
-        long claimStartedAt = System.nanoTime();
+    private ReservationOutcome reserveOrderSubmitted(OrderSubmittedEvent event, ReservationPayloads payloads) {
+        int requiredCurrency = event.getAmount() * event.getPrice();
+        String orderType = event.getOrderType();
+        long cteStartedAt = System.nanoTime();
         try {
-            return orderSubmissionIdempotencyRepository.claimOrderSubmission(
-                    event.getOrderId(), event.getUserId()) == 1;
+            return jdbcTemplate.queryForObject("""
+                    WITH claimed AS (
+                        INSERT INTO wallet_service.order_submission_idempotency(order_id, user_id, recorded_at)
+                        VALUES (?, ?, CURRENT_TIMESTAMP)
+                        ON CONFLICT (order_id) DO NOTHING
+                        RETURNING order_id
+                    ),
+                    wallet_state AS (
+                        SELECT w.user_id,
+                               CASE
+                                   WHEN ? = 'BUY' THEN w.available_currency >= ?
+                                   WHEN ? = 'SELL' THEN w.available_amount >= ?
+                                   ELSE false
+                               END AS has_assets
+                        FROM wallet_service.wallets w
+                        JOIN claimed ON TRUE
+                        WHERE w.user_id = ?
+                    ),
+                    reserved AS (
+                        UPDATE wallet_service.wallets w
+                        SET available_currency = CASE WHEN ? = 'BUY'
+                                THEN w.available_currency - ? ELSE w.available_currency END,
+                            locked_currency = CASE WHEN ? = 'BUY'
+                                THEN w.locked_currency + ? ELSE w.locked_currency END,
+                            available_amount = CASE WHEN ? = 'SELL'
+                                THEN w.available_amount - ? ELSE w.available_amount END,
+                            locked_amount = CASE WHEN ? = 'SELL'
+                                THEN w.locked_amount + ? ELSE w.locked_amount END,
+                            version = version + 1,
+                            update_time = CURRENT_TIMESTAMP
+                        FROM wallet_state ws
+                        WHERE w.user_id = ws.user_id
+                          AND ws.has_assets
+                        RETURNING w.user_id
+                    ),
+                    outbox_inserted AS (
+                        INSERT INTO wallet_service.outbox
+                            (event_type, routing_key, payload, status,
+                             created_at, attempt_count, next_retry_at, updated_at)
+                        SELECT
+                            CASE WHEN EXISTS (SELECT 1 FROM reserved)
+                                THEN 'OrderConfirmedEvent' ELSE 'OrderFailedEvent' END,
+                            CASE WHEN EXISTS (SELECT 1 FROM reserved)
+                                THEN ? ELSE ? END,
+                            CASE
+                                WHEN ? THEN ?
+                                WHEN EXISTS (SELECT 1 FROM reserved) THEN ?
+                                WHEN NOT EXISTS (SELECT 1 FROM wallet_state) THEN ?
+                                ELSE ?
+                            END,
+                            'PENDING',
+                            CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        FROM claimed
+                        RETURNING id
+                    )
+                    SELECT
+                        (SELECT COUNT(*) FROM claimed) AS claimed,
+                        (SELECT COUNT(*) FROM wallet_state) AS wallet_exists,
+                        (SELECT COUNT(*) FROM reserved) AS reserved,
+                        (SELECT COUNT(*) FROM outbox_inserted) AS outbox_inserted
+                    """, (rs, rowNum) -> new ReservationOutcome(
+                            rs.getInt("claimed"),
+                            rs.getInt("wallet_exists"),
+                            rs.getInt("reserved"),
+                            rs.getInt("outbox_inserted")),
+                    event.getOrderId(), event.getUserId(),
+                    orderType, requiredCurrency,
+                    orderType, event.getAmount(),
+                    event.getUserId(),
+                    orderType, requiredCurrency,
+                    orderType, requiredCurrency,
+                    orderType, event.getAmount(),
+                    orderType, event.getAmount(),
+                    ORDER_CONFIRMED_KEY, ORDER_FAILED_KEY,
+                    payloads.invalidType(),
+                    payloads.insufficientPayload(),
+                    payloads.confirmedPayload(),
+                    payloads.walletMissingPayload(),
+                    payloads.insufficientPayload());
         } finally {
-            walletMetrics.recordOrderSubmittedIdempotencyClaim(
-                    Duration.ofNanos(System.nanoTime() - claimStartedAt));
+            walletMetrics.recordOrderSubmittedReservationCte(
+                    Duration.ofNanos(System.nanoTime() - cteStartedAt));
         }
     }
 
-    private void insertOutbox(String eventType, String routingKey, String payload) {
-        jdbcTemplate.update("""
-                INSERT INTO wallet_service.outbox
-                    (event_type, routing_key, payload, status,
-                     created_at, attempt_count, next_retry_at, updated_at)
-                VALUES
-                    (?, ?, ?, 'PENDING',
-                     CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                """, eventType, routingKey, payload);
+    record ReservationPayloads(
+            String confirmedPayload,
+            String insufficientPayload,
+            String walletMissingPayload,
+            String insufficientReason,
+            boolean invalidType) {
+
+        static ReservationPayloads invalidType(String payload) {
+            return new ReservationPayloads(payload, payload, payload, "訂單類型錯誤", true);
+        }
     }
+
+    record ReservationOutcome(int claimed, int walletExists, int reserved, int outboxInserted) {
+    }
+
 }
