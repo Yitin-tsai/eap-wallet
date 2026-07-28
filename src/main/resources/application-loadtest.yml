@@ -28,6 +28,9 @@ eap:
     outbox-relay:
       batch-size: 500
       publish-concurrency: 1
+      async-relay-enabled: ${EAP_WALLET_OUTBOX_ASYNC_RELAY_ENABLED:false}
+      async-max-in-flight-batches: ${EAP_WALLET_OUTBOX_ASYNC_MAX_IN_FLIGHT_BATCHES:4}
+      in-flight-timeout-seconds: ${EAP_WALLET_OUTBOX_IN_FLIGHT_TIMEOUT_SECONDS:30}
       poll-interval-ms: 100
 
 logging:

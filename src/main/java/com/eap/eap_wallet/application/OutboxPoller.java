@@ -47,6 +47,11 @@ public class OutboxPoller {
     private final int batchSize;
     private final int publishConcurrency;
     private final ExecutorService publishExecutor;
+    private final boolean asyncRelayEnabled;
+    private final int asyncMaxInFlightBatches;
+    private final ExecutorService asyncRelayExecutor;
+    private final AtomicInteger asyncInFlightBatches = new AtomicInteger();
+    private final long inFlightTimeoutSeconds;
     private final long confirmTimeoutMs;
     private final int maxAttempts;
     private final long initialBackoffMs;
@@ -60,6 +65,9 @@ public class OutboxPoller {
             WalletMetrics walletMetrics,
             @Value("${eap.wallet.outbox-relay.batch-size:200}") int batchSize,
             @Value("${eap.wallet.outbox-relay.publish-concurrency:1}") int publishConcurrency,
+            @Value("${eap.wallet.outbox-relay.async-relay-enabled:false}") boolean asyncRelayEnabled,
+            @Value("${eap.wallet.outbox-relay.async-max-in-flight-batches:4}") int asyncMaxInFlightBatches,
+            @Value("${eap.wallet.outbox-relay.in-flight-timeout-seconds:30}") long inFlightTimeoutSeconds,
             @Value("${eap.wallet.outbox-relay.confirm-timeout-ms:5000}") long confirmTimeoutMs,
             @Value("${eap.wallet.outbox-relay.max-attempts:10}") int maxAttempts,
             @Value("${eap.wallet.outbox-relay.initial-backoff-ms:1000}") long initialBackoffMs,
@@ -74,6 +82,12 @@ public class OutboxPoller {
         this.publishExecutor = this.publishConcurrency > 1
                 ? Executors.newFixedThreadPool(this.publishConcurrency, new WalletOutboxPublishThreadFactory())
                 : null;
+        this.asyncRelayEnabled = asyncRelayEnabled;
+        this.asyncMaxInFlightBatches = Math.max(1, asyncMaxInFlightBatches);
+        this.asyncRelayExecutor = asyncRelayEnabled
+                ? Executors.newFixedThreadPool(this.asyncMaxInFlightBatches, new WalletOutboxAsyncRelayThreadFactory())
+                : null;
+        this.inFlightTimeoutSeconds = Math.max(1, inFlightTimeoutSeconds);
         this.confirmTimeoutMs = confirmTimeoutMs;
         this.maxAttempts = maxAttempts;
         this.initialBackoffMs = initialBackoffMs;
@@ -85,92 +99,165 @@ public class OutboxPoller {
         if (publishExecutor != null) {
             publishExecutor.shutdown();
         }
+        if (asyncRelayExecutor != null) {
+            asyncRelayExecutor.shutdown();
+        }
     }
 
     @Scheduled(fixedDelayString = "${eap.wallet.outbox-relay.poll-interval-ms:500}")
     public void pollAndPublish() {
+        if (asyncRelayEnabled) {
+            pollAndPublishAsync();
+            return;
+        }
+
         boolean continueDraining;
         do {
             Instant batchStartedAt = Instant.now();
-            Instant selectStartedAt = Instant.now();
-            List<OutboxRow> pending;
-            try {
-                pending = jdbcTemplate.query("""
-                                SELECT id, event_type, routing_key, payload, attempt_count
-                                FROM wallet_service.outbox
-                                WHERE status = 'PENDING'
-                                  AND next_retry_at <= CURRENT_TIMESTAMP
-                                ORDER BY created_at, id
-                                LIMIT ?
-                                """,
-                        (rs, rowNum) -> new OutboxRow(
-                                rs.getLong("id"),
-                                rs.getString("event_type"),
-                                rs.getString("routing_key"),
-                                rs.getString("payload"),
-                                rs.getInt("attempt_count")),
-                        batchSize);
-            } finally {
-                walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
-            }
+            List<OutboxRow> pending = selectPendingBatch();
             if (pending.isEmpty()) {
                 return;
             }
-            boolean batchSucceeded = true;
-            List<PublishAttempt> attempts = new ArrayList<>(pending.size());
-
-            List<PublishResult> publishResults = publishBatch(pending);
-            for (PublishResult result : publishResults) {
-                if (result.succeeded()) {
-                    attempts.add(new PublishAttempt(result.entry(), result.correlationData(), result.startedAt()));
-                } else {
-                    batchSucceeded = false;
-                    walletMetrics.outboxPublishFailed();
-                    recordFailure(result.entry(), result.failure());
-                    walletMetrics.recordOutboxPublish(Duration.between(result.startedAt(), Instant.now()));
-                }
-            }
-
-            long confirmationDeadlineNanos = System.nanoTime()
-                    + TimeUnit.MILLISECONDS.toNanos(confirmTimeoutMs);
-            List<PublishAttempt> confirmedAttempts = new ArrayList<>(attempts.size());
-            for (PublishAttempt attempt : attempts) {
-                OutboxRow entry = attempt.entry();
-                Instant confirmStartedAt = Instant.now();
-                try {
-                    awaitBrokerConfirmation(entry, attempt.correlationData(), confirmationDeadlineNanos);
-                    confirmedAttempts.add(attempt);
-                } catch (InterruptedException e) {
-                    Thread.currentThread().interrupt();
-                    walletMetrics.outboxPublishFailed();
-                    log.warn("Outbox relay interrupted while waiting for broker confirmation: id={}", entry.id());
-                    return;
-                } catch (Exception e) {
-                    batchSucceeded = false;
-                    walletMetrics.outboxPublishFailed();
-                    recordFailure(entry, e);
-                    walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), Instant.now()));
-                } finally {
-                    walletMetrics.recordOutboxConfirm(Duration.between(confirmStartedAt, Instant.now()));
-                }
-            }
-
-            if (!confirmedAttempts.isEmpty()) {
-                try {
-                    markConfirmedAsSent(confirmedAttempts);
-                } catch (Exception e) {
-                    batchSucceeded = false;
-                    for (PublishAttempt attempt : confirmedAttempts) {
-                        walletMetrics.outboxPublishFailed();
-                        recordFailure(attempt.entry(), e);
-                        walletMetrics.recordOutboxPublish(
-                                Duration.between(attempt.startedAt(), Instant.now()));
-                    }
-                }
-            }
+            boolean batchSucceeded = processBatch(pending, "PENDING", batchStartedAt);
             continueDraining = batchSucceeded && pending.size() == batchSize;
-            walletMetrics.recordOutboxBatch(Duration.between(batchStartedAt, Instant.now()));
         } while (continueDraining);
+    }
+
+    private void pollAndPublishAsync() {
+        while (asyncInFlightBatches.get() < asyncMaxInFlightBatches) {
+            Instant batchStartedAt = Instant.now();
+            List<OutboxRow> pending = claimBatchForAsyncRelay();
+            if (pending.isEmpty()) {
+                return;
+            }
+            asyncInFlightBatches.incrementAndGet();
+            asyncRelayExecutor.submit(() -> {
+                try {
+                    processBatch(pending, "IN_FLIGHT", batchStartedAt);
+                } finally {
+                    asyncInFlightBatches.decrementAndGet();
+                }
+            });
+        }
+    }
+
+    private List<OutboxRow> selectPendingBatch() {
+        Instant selectStartedAt = Instant.now();
+        try {
+            return jdbcTemplate.query("""
+                            SELECT id, event_type, routing_key, payload, attempt_count
+                            FROM wallet_service.outbox
+                            WHERE status = 'PENDING'
+                              AND next_retry_at <= CURRENT_TIMESTAMP
+                            ORDER BY created_at, id
+                            LIMIT ?
+                            """,
+                    this::mapOutboxRow,
+                    batchSize);
+        } finally {
+            walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
+        }
+    }
+
+    private List<OutboxRow> claimBatchForAsyncRelay() {
+        Instant selectStartedAt = Instant.now();
+        try {
+            return namedJdbcTemplate.query("""
+                    WITH candidate AS (
+                        SELECT id
+                        FROM wallet_service.outbox
+                        WHERE (status = 'PENDING' AND next_retry_at <= CURRENT_TIMESTAMP)
+                           OR (status = 'IN_FLIGHT'
+                               AND updated_at <= CURRENT_TIMESTAMP - (:inFlightTimeoutSeconds * INTERVAL '1 second'))
+                        ORDER BY created_at, id
+                        LIMIT :limit
+                        FOR UPDATE SKIP LOCKED
+                    ),
+                    claimed AS (
+                        UPDATE wallet_service.outbox outbox
+                        SET status = 'IN_FLIGHT',
+                            updated_at = CURRENT_TIMESTAMP,
+                            last_error = NULL
+                        FROM candidate
+                        WHERE outbox.id = candidate.id
+                        RETURNING outbox.id, outbox.event_type, outbox.routing_key, outbox.payload,
+                                  outbox.attempt_count, outbox.created_at
+                    )
+                    SELECT id, event_type, routing_key, payload, attempt_count
+                    FROM claimed
+                    ORDER BY created_at, id
+                    """, new MapSqlParameterSource()
+                    .addValue("limit", batchSize)
+                    .addValue("inFlightTimeoutSeconds", inFlightTimeoutSeconds), this::mapOutboxRow);
+        } finally {
+            walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
+        }
+    }
+
+    private OutboxRow mapOutboxRow(java.sql.ResultSet rs, int rowNum) throws java.sql.SQLException {
+        return new OutboxRow(
+                rs.getLong("id"),
+                rs.getString("event_type"),
+                rs.getString("routing_key"),
+                rs.getString("payload"),
+                rs.getInt("attempt_count"));
+    }
+
+    private boolean processBatch(List<OutboxRow> pending, String expectedStatus, Instant batchStartedAt) {
+        boolean batchSucceeded = true;
+        List<PublishAttempt> attempts = new ArrayList<>(pending.size());
+
+        List<PublishResult> publishResults = publishBatch(pending);
+        for (PublishResult result : publishResults) {
+            if (result.succeeded()) {
+                attempts.add(new PublishAttempt(result.entry(), result.correlationData(), result.startedAt()));
+            } else {
+                batchSucceeded = false;
+                walletMetrics.outboxPublishFailed();
+                recordFailure(result.entry(), result.failure(), expectedStatus);
+                walletMetrics.recordOutboxPublish(Duration.between(result.startedAt(), Instant.now()));
+            }
+        }
+
+        long confirmationDeadlineNanos = System.nanoTime()
+                + TimeUnit.MILLISECONDS.toNanos(confirmTimeoutMs);
+        List<PublishAttempt> confirmedAttempts = new ArrayList<>(attempts.size());
+        for (PublishAttempt attempt : attempts) {
+            OutboxRow entry = attempt.entry();
+            Instant confirmStartedAt = Instant.now();
+            try {
+                awaitBrokerConfirmation(entry, attempt.correlationData(), confirmationDeadlineNanos);
+                confirmedAttempts.add(attempt);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                walletMetrics.outboxPublishFailed();
+                log.warn("Outbox relay interrupted while waiting for broker confirmation: id={}", entry.id());
+                return false;
+            } catch (Exception e) {
+                batchSucceeded = false;
+                walletMetrics.outboxPublishFailed();
+                recordFailure(entry, e, expectedStatus);
+                walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), Instant.now()));
+            } finally {
+                walletMetrics.recordOutboxConfirm(Duration.between(confirmStartedAt, Instant.now()));
+            }
+        }
+
+        if (!confirmedAttempts.isEmpty()) {
+            try {
+                markConfirmedAsSent(confirmedAttempts, expectedStatus);
+            } catch (Exception e) {
+                batchSucceeded = false;
+                for (PublishAttempt attempt : confirmedAttempts) {
+                    walletMetrics.outboxPublishFailed();
+                    recordFailure(attempt.entry(), e, expectedStatus);
+                    walletMetrics.recordOutboxPublish(
+                            Duration.between(attempt.startedAt(), Instant.now()));
+                }
+            }
+        }
+        walletMetrics.recordOutboxBatch(Duration.between(batchStartedAt, Instant.now()));
+        return batchSucceeded;
     }
 
     private List<PublishResult> publishBatch(List<OutboxRow> pending) {
@@ -245,7 +332,7 @@ public class OutboxPoller {
         }
     }
 
-    private void recordFailure(OutboxRow entry, Exception failure) {
+    private void recordFailure(OutboxRow entry, Exception failure, String expectedStatus) {
         int attemptCount = entry.attemptCount() + 1;
         String error = failure.getClass().getSimpleName() + ": "
                 + (failure.getMessage() == null ? "no message" : failure.getMessage());
@@ -263,12 +350,13 @@ public class OutboxPoller {
                         last_error = :lastError,
                         updated_at = :updatedAt
                     WHERE id = :id
-                      AND status = 'PENDING'
+                      AND status = :expectedStatus
                     """, new MapSqlParameterSource()
                     .addValue("attemptCount", attemptCount)
                     .addValue("lastError", truncatedError)
                     .addValue("updatedAt", updatedAt)
-                    .addValue("id", entry.id()));
+                    .addValue("id", entry.id())
+                    .addValue("expectedStatus", expectedStatus));
         } else {
             long backoffMs = calculateBackoffMs(attemptCount);
             LocalDateTime nextRetryAt = updatedAt.plusNanos(TimeUnit.MILLISECONDS.toNanos(backoffMs));
@@ -280,20 +368,21 @@ public class OutboxPoller {
                         last_error = :lastError,
                         updated_at = :updatedAt
                     WHERE id = :id
-                      AND status = 'PENDING'
+                      AND status = :expectedStatus
                     """, new MapSqlParameterSource()
                     .addValue("attemptCount", attemptCount)
                     .addValue("nextRetryAt", nextRetryAt)
                     .addValue("lastError", truncatedError)
                     .addValue("updatedAt", updatedAt)
-                    .addValue("id", entry.id()));
+                    .addValue("id", entry.id())
+                    .addValue("expectedStatus", expectedStatus));
             walletMetrics.outboxRetryScheduled();
             log.warn("Outbox publish failed; retry scheduled: id={}, attempt={}/{}, backoffMs={}, error={}",
                     entry.id(), attemptCount, maxAttempts, backoffMs, truncatedError);
         }
     }
 
-    private void markConfirmedAsSent(List<PublishAttempt> confirmedAttempts) {
+    private void markConfirmedAsSent(List<PublishAttempt> confirmedAttempts, String expectedStatus) {
         List<Long> ids = confirmedAttempts.stream()
                 .map(attempt -> attempt.entry().id())
                 .toList();
@@ -308,10 +397,11 @@ public class OutboxPoller {
                         last_error = NULL,
                         updated_at = :updatedAt
                     WHERE id IN (:ids)
-                      AND status = 'PENDING'
+                      AND status = :expectedStatus
                     """, new MapSqlParameterSource()
                     .addValue("updatedAt", updatedAt)
-                    .addValue("ids", ids));
+                    .addValue("ids", ids)
+                    .addValue("expectedStatus", expectedStatus));
         } finally {
             walletMetrics.recordOutboxMarkSent(Duration.between(markStartedAt, Instant.now()));
         }
@@ -423,6 +513,17 @@ public class OutboxPoller {
         @Override
         public Thread newThread(Runnable runnable) {
             Thread thread = new Thread(runnable, "wallet-outbox-publisher-" + sequence.incrementAndGet());
+            thread.setDaemon(true);
+            return thread;
+        }
+    }
+
+    private static class WalletOutboxAsyncRelayThreadFactory implements java.util.concurrent.ThreadFactory {
+        private final AtomicInteger sequence = new AtomicInteger();
+
+        @Override
+        public Thread newThread(Runnable runnable) {
+            Thread thread = new Thread(runnable, "wallet-outbox-async-relay-" + sequence.incrementAndGet());
             thread.setDaemon(true);
             return thread;
         }

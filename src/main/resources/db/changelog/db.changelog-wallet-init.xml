@@ -274,4 +274,13 @@
         </sql>
     </changeSet>
 
+    <changeSet id="wallet-019" author="eap">
+        <comment>Index stale IN_FLIGHT wallet outbox records for experimental bounded async relay recovery</comment>
+        <sql>
+            CREATE INDEX idx_wallet_outbox_in_flight_timeout
+            ON wallet_service.outbox(updated_at)
+            WHERE status = 'IN_FLIGHT';
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>

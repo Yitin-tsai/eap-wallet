@@ -32,6 +32,7 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.timeout;
 
 @ExtendWith(MockitoExtension.class)
 class OutboxPollerTest {
@@ -63,6 +64,9 @@ class OutboxPollerTest {
                 walletMetrics,
                 25,
                 1,
+                false,
+                4,
+                30,
                 1000,
                 3,
                 1000,
@@ -165,6 +169,9 @@ class OutboxPollerTest {
                 walletMetrics,
                 2,
                 1,
+                false,
+                4,
+                30,
                 1000,
                 3,
                 1000,
@@ -199,6 +206,9 @@ class OutboxPollerTest {
                 walletMetrics,
                 2,
                 1,
+                false,
+                4,
+                30,
                 1000,
                 3,
                 1000,
@@ -224,6 +234,52 @@ class OutboxPollerTest {
 
         assertEquals(2, published.size());
         verify(walletMetrics, times(2)).outboxPublished();
+    }
+
+    @Test
+    void asyncRelay_shouldClaimInFlightAndMarkSentFromInFlightStatus() throws Exception {
+        OutboxPoller asyncPoller = new OutboxPoller(
+                outboxRepository,
+                jdbcTemplate,
+                namedJdbcTemplate,
+                rabbitTemplate,
+                walletMetrics,
+                2,
+                1,
+                true,
+                1,
+                30,
+                1000,
+                3,
+                1000,
+                8000
+        );
+        OutboxPoller.OutboxRow entry = pendingEntry(8L);
+        when(namedJdbcTemplate.query(
+                anyString(),
+                any(MapSqlParameterSource.class),
+                org.mockito.ArgumentMatchers.<RowMapper<OutboxPoller.OutboxRow>>any()))
+                .thenReturn(List.of(entry));
+        doAnswer(invocation -> {
+            CorrelationData correlationData = invocation.getArgument(3);
+            correlationData.getFuture().complete(new CorrelationData.Confirm(true, null));
+            return null;
+        }).when(rabbitTemplate).send(anyString(), anyString(), any(Message.class), any(CorrelationData.class));
+
+        asyncPoller.pollAndPublish();
+
+        verify(jdbcTemplate, never()).query(
+                anyString(),
+                org.mockito.ArgumentMatchers.<RowMapper<OutboxPoller.OutboxRow>>any(),
+                anyInt());
+        verify(namedJdbcTemplate, timeout(1000)).update(anyString(),
+                org.mockito.ArgumentMatchers.<MapSqlParameterSource>argThat(params ->
+                        params.hasValue("ids")
+                                && params.getValue("ids").equals(List.of(entry.id()))
+                                && params.hasValue("expectedStatus")
+                                && params.getValue("expectedStatus").equals("IN_FLIGHT")));
+        verify(walletMetrics, timeout(1000)).outboxPublished();
+        asyncPoller.shutdown();
     }
 
     private void stubPending(List<OutboxPoller.OutboxRow> first, List<OutboxPoller.OutboxRow>... rest) {
