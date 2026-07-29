@@ -74,3 +74,10 @@ tasks.register('walletDbCeilingProbe', JavaExec) {
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.eap.eap_wallet.loadtest.WalletDbCeilingProbe'
 }
+
+tasks.register('walletOrderSubmissionDbCeilingProbe', JavaExec) {
+    group = 'verification'
+    description = 'Measure isolated Wallet OrderSubmitted reservation SQL ceiling without RabbitMQ or Spring listener overhead.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.eap.eap_wallet.loadtest.WalletOrderSubmissionDbCeilingProbe'
+}
