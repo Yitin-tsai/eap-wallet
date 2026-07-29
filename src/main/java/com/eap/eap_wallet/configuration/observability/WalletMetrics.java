@@ -21,6 +21,9 @@ public class WalletMetrics {
     private final Counter optimisticLockRetryCounter;
     private final Timer orderSubmittedProcessingTimer;
     private final Timer orderSubmittedTransactionTimer;
+    private final Timer orderSubmittedTransactionBeforeCallbackTimer;
+    private final Timer orderSubmittedTransactionBodyTimer;
+    private final Timer orderSubmittedTransactionAfterBodyTimer;
     private final Timer orderSubmittedIdempotencyClaimTimer;
     private final Timer orderSubmittedWalletLookupTimer;
     private final Timer orderSubmittedOutboxWriteTimer;
@@ -68,6 +71,18 @@ public class WalletMetrics {
                 registry,
                 "eap_wallet_order_submitted_transaction_duration",
                 "Time spent executing and committing the wallet order transaction");
+        this.orderSubmittedTransactionBeforeCallbackTimer = stageTimer(
+                registry,
+                "eap_wallet_order_submitted_transaction_before_callback_duration",
+                "Time spent before the wallet order transaction callback starts");
+        this.orderSubmittedTransactionBodyTimer = stageTimer(
+                registry,
+                "eap_wallet_order_submitted_transaction_body_duration",
+                "Time spent inside the wallet order transaction callback");
+        this.orderSubmittedTransactionAfterBodyTimer = stageTimer(
+                registry,
+                "eap_wallet_order_submitted_transaction_after_body_duration",
+                "Time spent after the wallet order transaction callback body completes");
         this.orderSubmittedIdempotencyClaimTimer = stageTimer(
                 registry,
                 "eap_wallet_order_submitted_idempotency_claim_duration",
@@ -193,6 +208,18 @@ public class WalletMetrics {
 
     public void recordOrderSubmittedTransaction(Duration duration) {
         orderSubmittedTransactionTimer.record(duration);
+    }
+
+    public void recordOrderSubmittedTransactionBeforeCallback(Duration duration) {
+        orderSubmittedTransactionBeforeCallbackTimer.record(duration);
+    }
+
+    public void recordOrderSubmittedTransactionBody(Duration duration) {
+        orderSubmittedTransactionBodyTimer.record(duration);
+    }
+
+    public void recordOrderSubmittedTransactionAfterBody(Duration duration) {
+        orderSubmittedTransactionAfterBodyTimer.record(duration);
     }
 
     public void recordOrderSubmittedIdempotencyClaim(Duration duration) {

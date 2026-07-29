@@ -54,8 +54,15 @@ public class CreateOrderListener {
 
             for (int attempt = 1; attempt <= maxRetries; attempt++) {
                 long transactionStartedAt = System.nanoTime();
+                long[] callbackStartedAt = new long[1];
+                long[] bodyCompletedAt = new long[1];
                 try {
                     txTemplate.executeWithoutResult(status -> {
+                        callbackStartedAt[0] = System.nanoTime();
+                        walletMetrics.recordOrderSubmittedTransactionBeforeCallback(
+                                Duration.ofNanos(callbackStartedAt[0] - transactionStartedAt));
+                        long bodyStartedAt = System.nanoTime();
+                        try {
                         ReservationPayloads payloads = reservationPayloads(event);
                         ReservationOutcome outcome = reserveOrderSubmitted(event, payloads);
                         if (outcome.claimed() == 0) {
@@ -77,6 +84,11 @@ public class CreateOrderListener {
                             log.warn("資產不足: orderId={}, userId={}, reason={}",
                                     event.getOrderId(), event.getUserId(), payloads.insufficientReason());
                         }
+                        } finally {
+                            bodyCompletedAt[0] = System.nanoTime();
+                            walletMetrics.recordOrderSubmittedTransactionBody(
+                                    Duration.ofNanos(bodyCompletedAt[0] - bodyStartedAt));
+                        }
                     });
                     break; // success, exit retry loop
                 } catch (DataIntegrityViolationException e) {
@@ -93,8 +105,13 @@ public class CreateOrderListener {
                     log.warn("錢包保留交易衝突，重試 {}/{}: orderId={}, userId={}",
                             attempt, maxRetries, event.getOrderId(), event.getUserId());
                 } finally {
+                    long transactionCompletedAt = System.nanoTime();
+                    if (bodyCompletedAt[0] > 0) {
+                        walletMetrics.recordOrderSubmittedTransactionAfterBody(
+                                Duration.ofNanos(transactionCompletedAt - bodyCompletedAt[0]));
+                    }
                     walletMetrics.recordOrderSubmittedTransaction(
-                            Duration.ofNanos(System.nanoTime() - transactionStartedAt));
+                            Duration.ofNanos(transactionCompletedAt - transactionStartedAt));
                 }
             }
         } finally {
