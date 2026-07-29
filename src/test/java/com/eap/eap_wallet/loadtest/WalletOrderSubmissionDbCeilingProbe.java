@@ -90,7 +90,7 @@ public class WalletOrderSubmissionDbCeilingProbe {
                         WHEN NOT EXISTS (SELECT 1 FROM wallet_state) THEN ?
                         ELSE ?
                     END,
-                    'PENDING',
+                    ?,
                     CURRENT_TIMESTAMP, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
                 FROM claimed
                 RETURNING id
@@ -254,8 +254,10 @@ public class WalletOrderSubmissionDbCeilingProbe {
         int requiredCurrency = price * amount;
         UUID orderId = orderId(config.marketId(), sequence);
         UUID userId = userId(config.marketId(), sequence);
-        String confirmedPayload = "{\"orderId\":\"" + orderId + "\",\"marketId\":\"" + config.marketId()
-                + "\",\"orderType\":\"" + side + "\",\"price\":" + price + ",\"amount\":" + amount + "}";
+        String confirmedPayload = "{\"orderId\":\"" + orderId + "\",\"userId\":\"" + userId
+                + "\",\"marketId\":\"" + config.marketId() + "\",\"marketSequence\":" + sequence
+                + ",\"orderType\":\"" + side + "\",\"price\":" + price + ",\"amount\":" + amount
+                + ",\"createdAt\":\"" + LocalDateTime.now() + "\"}";
         String failedPayload = "{\"orderId\":\"" + orderId + "\",\"reason\":\"INSUFFICIENT_ASSETS\"}";
         String walletMissingPayload = "{\"orderId\":\"" + orderId + "\",\"reason\":\"WALLET_NOT_FOUND\"}";
 
@@ -280,6 +282,7 @@ public class WalletOrderSubmissionDbCeilingProbe {
         statement.setString(19, confirmedPayload);
         statement.setString(20, walletMissingPayload);
         statement.setString(21, failedPayload);
+        statement.setString(22, config.outboxStatus());
     }
 
     private static UUID orderId(String marketId, long sequence) {
@@ -323,6 +326,7 @@ public class WalletOrderSubmissionDbCeilingProbe {
         System.out.printf("  \"workers\": %d,%n", config.workers());
         System.out.printf("  \"batchSize\": %d,%n", config.batchSize());
         System.out.printf("  \"side\": \"%s\",%n", config.side().name().toLowerCase());
+        System.out.printf("  \"outboxStatus\": \"%s\",%n", config.outboxStatus());
         System.out.printf("  \"seedWallets\": %s,%n", config.seedWallets());
         System.out.printf("  \"completed\": %d,%n", result.completed());
         System.out.printf("  \"failures\": %d,%n", result.failures());
@@ -379,7 +383,8 @@ public class WalletOrderSubmissionDbCeilingProbe {
             int seedBalance,
             boolean seedWallets,
             Mode mode,
-            Side side) {
+            Side side,
+            String outboxStatus) {
 
         private static Config from(String[] args) {
             Mode mode = Mode.valueOf(stringArg(args, "--mode", "transaction_per_row").toUpperCase());
@@ -395,7 +400,8 @@ public class WalletOrderSubmissionDbCeilingProbe {
                     intArg(args, "--seed-balance", 1_000_000),
                     booleanArg(args, "--seed-wallets", true),
                     mode,
-                    side);
+                    side,
+                    stringArg(args, "--outbox-status", "SENT").toUpperCase());
         }
 
         private static int intArg(String[] args, String name, int defaultValue) {
