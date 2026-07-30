@@ -65,6 +65,7 @@ class OutboxPollerTest {
                 25,
                 1,
                 false,
+                false,
                 4,
                 30,
                 1000,
@@ -170,6 +171,7 @@ class OutboxPollerTest {
                 2,
                 1,
                 false,
+                false,
                 4,
                 30,
                 1000,
@@ -207,6 +209,7 @@ class OutboxPollerTest {
                 2,
                 1,
                 false,
+                false,
                 4,
                 30,
                 1000,
@@ -237,6 +240,39 @@ class OutboxPollerTest {
     }
 
     @Test
+    void batchConfirmEnabled_shouldUseChannelConfirmForWholeBatch() throws Exception {
+        OutboxPoller batchConfirmPoller = new OutboxPoller(
+                outboxRepository,
+                jdbcTemplate,
+                namedJdbcTemplate,
+                rabbitTemplate,
+                walletMetrics,
+                2,
+                1,
+                true,
+                false,
+                4,
+                30,
+                1000,
+                3,
+                1000,
+                8000
+        );
+        OutboxPoller.OutboxRow first = pendingEntry(10L);
+        OutboxPoller.OutboxRow second = pendingEntry(11L);
+        stubPending(List.of(first, second), List.of());
+
+        batchConfirmPoller.pollAndPublish();
+
+        verify(rabbitTemplate, times(2)).send(
+                anyString(), anyString(), any(Message.class), any(CorrelationData.class));
+        verify(rabbitTemplate).waitForConfirmsOrDie(1000);
+        verify(namedJdbcTemplate).update(anyString(), org.mockito.ArgumentMatchers.<MapSqlParameterSource>argThat(params ->
+                params.hasValue("ids") && params.getValue("ids").equals(List.of(first.id(), second.id()))));
+        verify(walletMetrics, times(2)).outboxPublished();
+    }
+
+    @Test
     void asyncRelay_shouldClaimInFlightAndMarkSentFromInFlightStatus() throws Exception {
         OutboxPoller asyncPoller = new OutboxPoller(
                 outboxRepository,
@@ -246,6 +282,7 @@ class OutboxPollerTest {
                 walletMetrics,
                 2,
                 1,
+                false,
                 true,
                 1,
                 30,

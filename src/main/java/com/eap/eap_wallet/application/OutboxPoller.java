@@ -46,6 +46,7 @@ public class OutboxPoller {
     private final WalletMetrics walletMetrics;
     private final int batchSize;
     private final int publishConcurrency;
+    private final boolean batchConfirmEnabled;
     private final ExecutorService publishExecutor;
     private final boolean asyncRelayEnabled;
     private final int asyncMaxInFlightBatches;
@@ -65,6 +66,7 @@ public class OutboxPoller {
             WalletMetrics walletMetrics,
             @Value("${eap.wallet.outbox-relay.batch-size:200}") int batchSize,
             @Value("${eap.wallet.outbox-relay.publish-concurrency:1}") int publishConcurrency,
+            @Value("${eap.wallet.outbox-relay.batch-confirm-enabled:false}") boolean batchConfirmEnabled,
             @Value("${eap.wallet.outbox-relay.async-relay-enabled:false}") boolean asyncRelayEnabled,
             @Value("${eap.wallet.outbox-relay.async-max-in-flight-batches:4}") int asyncMaxInFlightBatches,
             @Value("${eap.wallet.outbox-relay.in-flight-timeout-seconds:30}") long inFlightTimeoutSeconds,
@@ -79,6 +81,7 @@ public class OutboxPoller {
         this.walletMetrics = walletMetrics;
         this.batchSize = batchSize;
         this.publishConcurrency = Math.max(1, publishConcurrency);
+        this.batchConfirmEnabled = batchConfirmEnabled;
         this.publishExecutor = this.publishConcurrency > 1
                 ? Executors.newFixedThreadPool(this.publishConcurrency, new WalletOutboxPublishThreadFactory())
                 : null;
@@ -222,24 +225,28 @@ public class OutboxPoller {
         long confirmationDeadlineNanos = System.nanoTime()
                 + TimeUnit.MILLISECONDS.toNanos(confirmTimeoutMs);
         List<PublishAttempt> confirmedAttempts = new ArrayList<>(attempts.size());
-        for (PublishAttempt attempt : attempts) {
-            OutboxRow entry = attempt.entry();
-            Instant confirmStartedAt = Instant.now();
-            try {
-                awaitBrokerConfirmation(entry, attempt.correlationData(), confirmationDeadlineNanos);
-                confirmedAttempts.add(attempt);
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
-                walletMetrics.outboxPublishFailed();
-                log.warn("Outbox relay interrupted while waiting for broker confirmation: id={}", entry.id());
-                return false;
-            } catch (Exception e) {
-                batchSucceeded = false;
-                walletMetrics.outboxPublishFailed();
-                recordFailure(entry, e, expectedStatus);
-                walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), Instant.now()));
-            } finally {
-                walletMetrics.recordOutboxConfirm(Duration.between(confirmStartedAt, Instant.now()));
+        if (batchConfirmEnabled) {
+            confirmedAttempts.addAll(attempts);
+        } else {
+            for (PublishAttempt attempt : attempts) {
+                OutboxRow entry = attempt.entry();
+                Instant confirmStartedAt = Instant.now();
+                try {
+                    awaitBrokerConfirmation(entry, attempt.correlationData(), confirmationDeadlineNanos);
+                    confirmedAttempts.add(attempt);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    walletMetrics.outboxPublishFailed();
+                    log.warn("Outbox relay interrupted while waiting for broker confirmation: id={}", entry.id());
+                    return false;
+                } catch (Exception e) {
+                    batchSucceeded = false;
+                    walletMetrics.outboxPublishFailed();
+                    recordFailure(entry, e, expectedStatus);
+                    walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), Instant.now()));
+                } finally {
+                    walletMetrics.recordOutboxConfirm(Duration.between(confirmStartedAt, Instant.now()));
+                }
             }
         }
 
@@ -264,12 +271,13 @@ public class OutboxPoller {
         if (publishConcurrency == 1 || pending.size() <= 1) {
             List<PublishResult> results = new ArrayList<>(pending.size());
             try {
-                rabbitTemplate.invoke(operations -> {
-                    for (OutboxRow entry : pending) {
-                        results.add(publishOne(entry, operations));
-                    }
-                    return null;
-                });
+            rabbitTemplate.invoke(operations -> {
+                for (OutboxRow entry : pending) {
+                    results.add(publishOne(entry, operations));
+                }
+                waitForBatchConfirmIfEnabled(results, operations);
+                return null;
+            });
             } catch (Exception e) {
                 int publishedOrFailed = results.size();
                 for (int i = publishedOrFailed; i < pending.size(); i++) {
@@ -296,6 +304,7 @@ public class OutboxPoller {
                 for (OutboxRow entry : chunk) {
                     results.add(publishOne(entry, operations));
                 }
+                waitForBatchConfirmIfEnabled(results, operations);
                 return null;
             });
         } catch (Exception e) {
@@ -315,6 +324,40 @@ public class OutboxPoller {
             chunks.add(pending.subList(start, Math.min(start + chunkSize, pending.size())));
         }
         return chunks;
+    }
+
+    private void waitForBatchConfirmIfEnabled(
+            List<PublishResult> results,
+            RabbitOperations operations) {
+        if (!batchConfirmEnabled || results.isEmpty()) {
+            return;
+        }
+        List<PublishResult> confirmableResults = results.stream()
+                .filter(PublishResult::succeeded)
+                .toList();
+        if (confirmableResults.isEmpty()) {
+            return;
+        }
+        Instant confirmStartedAt = Instant.now();
+        try {
+            operations.waitForConfirmsOrDie(confirmTimeoutMs);
+            for (PublishResult result : confirmableResults) {
+                if (result.correlationData().getReturned() != null) {
+                    throw new AmqpException("Unroutable outbox event: id=" + result.entry().id());
+                }
+            }
+        } catch (Exception e) {
+            List<OutboxRow> rows = confirmableResults.stream()
+                    .map(PublishResult::entry)
+                    .toList();
+            results.removeIf(PublishResult::succeeded);
+            for (OutboxRow row : rows) {
+                results.add(PublishResult.failure(row, Instant.now(), e));
+            }
+        } finally {
+            Duration confirmDuration = Duration.between(confirmStartedAt, Instant.now());
+            walletMetrics.recordOutboxConfirm(confirmDuration);
+        }
     }
 
     private PublishResult publishOne(OutboxRow entry, RabbitOperations operations) {

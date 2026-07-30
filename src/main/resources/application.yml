@@ -85,6 +85,7 @@ eap:
       batch-size: 200
       poll-interval-ms: 500
       confirm-timeout-ms: 5000
+      batch-confirm-enabled: false
       max-attempts: 10
       initial-backoff-ms: 1000
       max-backoff-ms: 300000
