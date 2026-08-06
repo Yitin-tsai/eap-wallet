@@ -4,35 +4,33 @@ spring:
     username: admin
     password: admin123
     hikari:
-      maximum-pool-size: 40
-      minimum-idle: 12
+      maximum-pool-size: ${EAP_WALLET_DB_POOL_SIZE:40}
+      minimum-idle: ${EAP_WALLET_DB_POOL_MIN_IDLE:12}
   rabbitmq:
     cache:
       channel:
         size: 128
     listener:
       simple:
-        concurrency: 4
-        max-concurrency: 32
-        prefetch: 20
+        concurrency: ${EAP_WALLET_RABBIT_CONCURRENCY:4}
+        max-concurrency: ${EAP_WALLET_RABBIT_MAX_CONCURRENCY:32}
+        prefetch: ${EAP_WALLET_RABBIT_PREFETCH:20}
 
 eap:
   wallet:
     listeners:
       order-submitted:
-        concurrency: 32
+        concurrency: ${EAP_WALLET_ORDER_SUBMITTED_CONCURRENCY:32}
       trade-executed:
-        concurrency: 12
-        batch-size: 50
-        receive-timeout-ms: 75
+        concurrency: ${EAP_WALLET_TRADE_EXECUTED_CONCURRENCY:8}
     outbox-relay:
       batch-size: ${EAP_WALLET_OUTBOX_BATCH_SIZE:500}
-      publish-concurrency: 1
+      publish-concurrency: ${EAP_WALLET_OUTBOX_PUBLISH_CONCURRENCY:1}
       batch-confirm-enabled: ${EAP_WALLET_OUTBOX_BATCH_CONFIRM_ENABLED:false}
       async-relay-enabled: ${EAP_WALLET_OUTBOX_ASYNC_RELAY_ENABLED:false}
       async-max-in-flight-batches: ${EAP_WALLET_OUTBOX_ASYNC_MAX_IN_FLIGHT_BATCHES:4}
       in-flight-timeout-seconds: ${EAP_WALLET_OUTBOX_IN_FLIGHT_TIMEOUT_SECONDS:30}
-      poll-interval-ms: 100
+      poll-interval-ms: ${EAP_WALLET_OUTBOX_POLL_INTERVAL_MS:100}
 
 logging:
   level:

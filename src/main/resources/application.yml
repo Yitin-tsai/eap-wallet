@@ -75,8 +75,6 @@ eap:
         concurrency: 8
       trade-executed:
         concurrency: 4
-        batch-size: 1
-        receive-timeout-ms: 50
       order-matched:
         concurrency: 4
     outbox-admin:

@@ -3,72 +3,17 @@ package com.eap.eap_wallet.application;
 import com.eap.common.event.TradeExecutedEvent;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import lombok.RequiredArgsConstructor;
-import org.springframework.jdbc.core.ConnectionCallback;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
 
-import java.sql.Array;
-import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.Timestamp;
 import java.time.Duration;
 import java.time.LocalDateTime;
-import java.util.List;
 import java.util.UUID;
 
 @Component
 @RequiredArgsConstructor
 public class WalletTradeSettlementAppender {
-
-    static final String APPEND_BATCH_SQL = """
-            WITH input(trade_id, legacy_match_id, settled_at,
-                       buyer_id, seller_id, quantity, original_locked_currency, refund_currency,
-                       deal_currency) AS (
-                SELECT *
-                FROM unnest(?::varchar[], ?::integer[], ?::timestamp[],
-                            ?::uuid[], ?::uuid[], ?::integer[], ?::integer[],
-                            ?::integer[], ?::integer[])
-            ),
-            settlement AS (
-                INSERT INTO wallet_service.trade_settlements
-                    (trade_id, legacy_match_id, settled_at)
-                SELECT trade_id, legacy_match_id, settled_at
-                FROM input
-                ON CONFLICT (trade_id) DO NOTHING
-                RETURNING trade_id
-            ),
-            buyer_update AS (
-                UPDATE wallet_service.wallets wallet
-                SET locked_currency = wallet.locked_currency - input.original_locked_currency,
-                    available_currency = wallet.available_currency + input.refund_currency,
-                    available_amount = wallet.available_amount + input.quantity,
-                    version = wallet.version + 1,
-                    update_time = CURRENT_TIMESTAMP
-                FROM input
-                JOIN settlement ON settlement.trade_id = input.trade_id
-                WHERE wallet.user_id = input.buyer_id
-                  AND wallet.locked_currency >= input.original_locked_currency
-                RETURNING 1
-            ),
-            seller_update AS (
-                UPDATE wallet_service.wallets wallet
-                SET locked_amount = wallet.locked_amount - input.quantity,
-                    available_currency = wallet.available_currency + input.deal_currency,
-                    version = wallet.version + 1,
-                    update_time = CURRENT_TIMESTAMP
-                FROM input
-                JOIN settlement ON settlement.trade_id = input.trade_id
-                WHERE wallet.user_id = input.seller_id
-                  AND wallet.locked_amount >= input.quantity
-                RETURNING 1
-            )
-            SELECT
-                (SELECT COUNT(*) FROM input) - (SELECT COUNT(*) FROM settlement) AS existing_settlements,
-                (SELECT COUNT(*) FROM settlement) AS inserted_settlements,
-                (SELECT COUNT(*) FROM buyer_update) AS updated_buyers,
-                (SELECT COUNT(*) FROM seller_update) AS updated_sellers
-            """;
 
     private final NamedParameterJdbcTemplate jdbcTemplate;
     private final WalletMetrics walletMetrics;
@@ -81,16 +26,31 @@ public class WalletTradeSettlementAppender {
         int refundCurrency = originalLockedCurrency - dealCurrency;
 
         int[] insertedSettlements = {0};
+        int[] existingSettlements = {0};
+        int[] lockedWallets = {0};
         int[] updatedBuyers = {0};
         int[] updatedSellers = {0};
         long cteStartedAt = System.nanoTime();
         try {
             jdbcTemplate.query("""
-                WITH settlement AS (
+                WITH locked_wallets AS MATERIALIZED (
+                    SELECT user_id
+                    FROM wallet_service.wallets
+                    WHERE user_id IN (:buyerId, :sellerId)
+                    ORDER BY user_id
+                    FOR UPDATE
+                ),
+                existing_settlement AS MATERIALIZED (
+                    SELECT trade_id
+                    FROM wallet_service.trade_settlements
+                    WHERE trade_id = :tradeId
+                ),
+                settlement AS (
                     INSERT INTO wallet_service.trade_settlements
                         (trade_id, legacy_match_id, settled_at)
-                    VALUES
-                        (:tradeId, :legacyMatchId, :settledAt)
+                    SELECT :tradeId, :legacyMatchId, :settledAt
+                    WHERE (SELECT COUNT(*) FROM locked_wallets) = 2
+                      AND NOT EXISTS (SELECT 1 FROM existing_settlement)
                     ON CONFLICT (trade_id) DO NOTHING
                     RETURNING trade_id
                 ),
@@ -102,6 +62,8 @@ public class WalletTradeSettlementAppender {
                         version = version + 1,
                         update_time = CURRENT_TIMESTAMP
                     WHERE user_id = :buyerId
+                      AND EXISTS (
+                          SELECT 1 FROM locked_wallets WHERE user_id = :buyerId)
                       AND EXISTS (SELECT 1 FROM settlement)
                       AND locked_currency >= :originalLockedCurrency
                     RETURNING 1
@@ -113,11 +75,15 @@ public class WalletTradeSettlementAppender {
                         version = version + 1,
                         update_time = CURRENT_TIMESTAMP
                     WHERE user_id = :sellerId
+                      AND EXISTS (
+                          SELECT 1 FROM locked_wallets WHERE user_id = :sellerId)
                       AND EXISTS (SELECT 1 FROM settlement)
                       AND locked_amount >= :quantity
                     RETURNING 1
                 )
                 SELECT
+                    (SELECT COUNT(*) FROM locked_wallets) AS locked_wallets,
+                    (SELECT COUNT(*) FROM existing_settlement) AS existing_settlements,
                     (SELECT COUNT(*) FROM settlement) AS inserted_settlements,
                     (SELECT COUNT(*) FROM buyer_update) AS updated_buyers,
                     (SELECT COUNT(*) FROM seller_update) AS updated_sellers
@@ -131,6 +97,8 @@ public class WalletTradeSettlementAppender {
                 .addValue("refundCurrency", refundCurrency)
                 .addValue("dealCurrency", dealCurrency)
                 .addValue("quantity", event.getQuantity()), rs -> {
+                    lockedWallets[0] = rs.getInt("locked_wallets");
+                    existingSettlements[0] = rs.getInt("existing_settlements");
                     insertedSettlements[0] = rs.getInt("inserted_settlements");
                     updatedBuyers[0] = rs.getInt("updated_buyers");
                     updatedSellers[0] = rs.getInt("updated_sellers");
@@ -140,6 +108,8 @@ public class WalletTradeSettlementAppender {
         }
 
         SettlementOutcome outcome = new SettlementOutcome(
+                lockedWallets[0],
+                existingSettlements[0],
                 insertedSettlements[0],
                 updatedBuyers[0],
                 updatedSellers[0],
@@ -153,6 +123,8 @@ public class WalletTradeSettlementAppender {
         if (!outcome.completed()) {
             throw new IllegalStateException("Wallet trade settlement did not persist settlement and update both wallets: tradeId="
                     + event.getTradeId()
+                    + ", lockedWallets=" + outcome.lockedWallets()
+                    + ", existingSettlements=" + outcome.existingSettlements()
                     + ", insertedSettlements=" + outcome.insertedSettlements()
                     + ", updatedBuyers=" + outcome.updatedBuyers()
                     + ", updatedSellers=" + outcome.updatedSellers());
@@ -160,126 +132,9 @@ public class WalletTradeSettlementAppender {
         return outcome;
     }
 
-    public BatchSettlementOutcome appendBatch(List<TradeExecutedEvent> events) {
-        if (events == null || events.isEmpty()) {
-            return new BatchSettlementOutcome(0, 0, 0, 0, 0);
-        }
-
-        long cteStartedAt = System.nanoTime();
-        try {
-            return jdbcTemplate.getJdbcTemplate().execute((ConnectionCallback<BatchSettlementOutcome>) connection -> {
-                Array tradeIds = null;
-                Array legacyMatchIds = null;
-                Array settledAts = null;
-                Array buyerIds = null;
-                Array sellerIds = null;
-                Array quantities = null;
-                Array originalLockedCurrencies = null;
-                Array refundCurrencies = null;
-                Array dealCurrencies = null;
-                try (PreparedStatement statement = connection.prepareStatement(APPEND_BATCH_SQL)) {
-                    BatchSettlementArrays arrays = batchSettlementArrays(events);
-                    tradeIds = connection.createArrayOf("varchar", arrays.tradeIds());
-                    legacyMatchIds = connection.createArrayOf("integer", arrays.legacyMatchIds());
-                    settledAts = connection.createArrayOf("timestamp", arrays.settledAts());
-                    buyerIds = connection.createArrayOf("uuid", arrays.buyerIds());
-                    sellerIds = connection.createArrayOf("uuid", arrays.sellerIds());
-                    quantities = connection.createArrayOf("integer", arrays.quantities());
-                    originalLockedCurrencies = connection.createArrayOf("integer", arrays.originalLockedCurrencies());
-                    refundCurrencies = connection.createArrayOf("integer", arrays.refundCurrencies());
-                    dealCurrencies = connection.createArrayOf("integer", arrays.dealCurrencies());
-
-                    statement.setArray(1, tradeIds);
-                    statement.setArray(2, legacyMatchIds);
-                    statement.setArray(3, settledAts);
-                    statement.setArray(4, buyerIds);
-                    statement.setArray(5, sellerIds);
-                    statement.setArray(6, quantities);
-                    statement.setArray(7, originalLockedCurrencies);
-                    statement.setArray(8, refundCurrencies);
-                    statement.setArray(9, dealCurrencies);
-
-                    try (ResultSet rs = statement.executeQuery()) {
-                        if (!rs.next()) {
-                            throw new IllegalStateException("Wallet trade settlement batch did not return an outcome");
-                        }
-                        return new BatchSettlementOutcome(
-                                events.size(),
-                                rs.getInt("existing_settlements"),
-                                rs.getInt("inserted_settlements"),
-                                rs.getInt("updated_buyers"),
-                                rs.getInt("updated_sellers"));
-                    }
-                } finally {
-                    freeQuietly(tradeIds);
-                    freeQuietly(legacyMatchIds);
-                    freeQuietly(settledAts);
-                    freeQuietly(buyerIds);
-                    freeQuietly(sellerIds);
-                    freeQuietly(quantities);
-                    freeQuietly(originalLockedCurrencies);
-                    freeQuietly(refundCurrencies);
-                    freeQuietly(dealCurrencies);
-                }
-            });
-        } finally {
-            walletMetrics.recordTradeSettlementCte(Duration.ofNanos(System.nanoTime() - cteStartedAt));
-        }
-    }
-
-    private BatchSettlementArrays batchSettlementArrays(List<TradeExecutedEvent> events) {
-        int size = events.size();
-        String[] tradeIds = new String[size];
-        Integer[] legacyMatchIds = new Integer[size];
-        Timestamp[] settledAts = new Timestamp[size];
-        UUID[] buyerIds = new UUID[size];
-        UUID[] sellerIds = new UUID[size];
-        Integer[] quantities = new Integer[size];
-        Integer[] originalLockedCurrencies = new Integer[size];
-        Integer[] refundCurrencies = new Integer[size];
-        Integer[] dealCurrencies = new Integer[size];
-
-        LocalDateTime now = LocalDateTime.now();
-        for (int i = 0; i < size; i++) {
-            TradeExecutedEvent event = events.get(i);
-            int dealCurrency = event.getDealPrice() * event.getQuantity();
-            int originalLockedCurrency = event.getOriginBuyerPrice() * event.getQuantity();
-            int refundCurrency = originalLockedCurrency - dealCurrency;
-            LocalDateTime settledAt = event.getOccurredAt() == null ? now : event.getOccurredAt();
-
-            tradeIds[i] = event.getTradeId();
-            legacyMatchIds[i] = event.getLegacyMatchId();
-            settledAts[i] = Timestamp.valueOf(settledAt);
-            buyerIds[i] = event.getBuyerId();
-            sellerIds[i] = event.getSellerId();
-            quantities[i] = event.getQuantity();
-            originalLockedCurrencies[i] = originalLockedCurrency;
-            refundCurrencies[i] = refundCurrency;
-            dealCurrencies[i] = dealCurrency;
-        }
-        return new BatchSettlementArrays(
-                tradeIds,
-                legacyMatchIds,
-                settledAts,
-                buyerIds,
-                sellerIds,
-                quantities,
-                originalLockedCurrencies,
-                refundCurrencies,
-                dealCurrencies);
-    }
-
-    private void freeQuietly(Array array) {
-        if (array == null) {
-            return;
-        }
-        try {
-            array.free();
-        } catch (Exception ignored) {
-        }
-    }
-
     public record SettlementOutcome(
+            int lockedWallets,
+            int existingSettlements,
             int insertedSettlements,
             int updatedBuyers,
             int updatedSellers,
@@ -289,44 +144,16 @@ public class WalletTradeSettlementAppender {
             LocalDateTime settledAt) {
 
         boolean duplicate() {
-            return insertedSettlements == 0;
+            return existingSettlements == 1 && insertedSettlements == 0;
         }
 
         boolean completed() {
-            return insertedSettlements == 1
+            return lockedWallets == 2
+                    && existingSettlements == 0
+                    && insertedSettlements == 1
                     && updatedBuyers == 1
                     && updatedSellers == 1;
         }
     }
 
-    public record BatchSettlementOutcome(
-            int requestedSettlements,
-            int existingSettlements,
-            int insertedSettlements,
-            int updatedBuyers,
-            int updatedSellers) {
-
-        boolean hasExistingSettlements() {
-            return existingSettlements > 0;
-        }
-
-        boolean completed() {
-            return requestedSettlements > 0
-                    && existingSettlements + insertedSettlements == requestedSettlements
-                    && updatedBuyers == insertedSettlements
-                    && updatedSellers == insertedSettlements;
-        }
-    }
-
-    private record BatchSettlementArrays(
-            String[] tradeIds,
-            Integer[] legacyMatchIds,
-            Timestamp[] settledAts,
-            UUID[] buyerIds,
-            UUID[] sellerIds,
-            Integer[] quantities,
-            Integer[] originalLockedCurrencies,
-            Integer[] refundCurrencies,
-            Integer[] dealCurrencies) {
-    }
 }

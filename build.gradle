@@ -59,6 +59,40 @@ tasks.named("generateContractTests") {
 
 tasks.named('test') {
     useJUnitPlatform()
+    systemProperty 'eap.integration.rabbit', System.getProperty('eap.integration.rabbit', 'false')
+}
+
+tasks.register('walletRabbitIntegrationTest', Test) {
+    group = 'verification'
+    description = 'Run the real RabbitMQ retry-exhaustion and dead-letter integration test.'
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    systemProperty 'eap.integration.rabbit', 'true'
+    systemProperty 'eap.integration.rabbit.host', System.getProperty('eap.integration.rabbit.host', 'localhost')
+    systemProperty 'eap.integration.rabbit.port', System.getProperty('eap.integration.rabbit.port', '5672')
+    systemProperty 'eap.integration.rabbit.user', System.getProperty('eap.integration.rabbit.user', 'admin')
+    systemProperty 'eap.integration.rabbit.vhost', System.getProperty('eap.integration.rabbit.vhost', '/')
+    systemProperty 'eap.integration.rabbit.password', System.getProperty(
+            'eap.integration.rabbit.password', System.getenv('EAP_RABBIT_IT_PASSWORD') ?: 'admin123')
+    include '**/*DeadLetterIT.class'
+    shouldRunAfter tasks.named('test')
+}
+
+tasks.register('walletPostgresIntegrationTest', Test) {
+    group = 'verification'
+    description = 'Run Wallet PostgreSQL concurrency integration tests against the load-test database.'
+    useJUnitPlatform()
+    testClassesDirs = sourceSets.test.output.classesDirs
+    classpath = sourceSets.test.runtimeClasspath
+    systemProperty 'eap.integration.postgres', 'true'
+    systemProperty 'eap.integration.postgres.url', System.getProperty(
+            'eap.integration.postgres.url', 'jdbc:postgresql://localhost:15433/eap_wallet_db')
+    systemProperty 'eap.integration.postgres.user', System.getProperty('eap.integration.postgres.user', 'admin')
+    systemProperty 'eap.integration.postgres.password', System.getProperty(
+            'eap.integration.postgres.password', System.getenv('EAP_POSTGRES_IT_PASSWORD') ?: 'admin123')
+    include '**/WalletTradeSettlementAppenderPostgresIT.class'
+    shouldRunAfter tasks.named('test')
 }
 
 tasks.register('walletAmqpLoadTest', JavaExec) {
@@ -80,4 +114,11 @@ tasks.register('walletOrderSubmissionDbCeilingProbe', JavaExec) {
     description = 'Measure isolated Wallet OrderSubmitted reservation SQL ceiling without RabbitMQ or Spring listener overhead.'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.eap.eap_wallet.loadtest.WalletOrderSubmissionDbCeilingProbe'
+}
+
+tasks.register('walletMixedDbCeilingProbe', JavaExec) {
+    group = 'verification'
+    description = 'Measure concurrent Wallet reservation and settlement SQL capacity on shared hot wallet rows.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.eap.eap_wallet.loadtest.WalletMixedDbCeilingProbe'
 }
