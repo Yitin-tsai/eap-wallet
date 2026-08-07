@@ -1,79 +1,59 @@
-# eap-wallet — LLM Context
+# eap-wallet - LLM Context
 
-> Port 8081 | Context Path: /eap-wallet
-> OpenAPI spec: `docs/api/wallet-service.json`
+> Port 8081 | Context path `/eap-wallet`
 
-## API Endpoints
+## Ownership
 
-| Endpoint | Description | Involves |
-|----------|-------------|----------|
-| POST /v1/wallet/register | 註冊用戶並建立錢包（初始餘額 10000） | wallet (DB) |
-| POST /v1/wallet/check | 內部：驗證餘額是否足夠（通常由 RabbitMQ 觸發） | wallet (DB, optimistic lock) |
-| GET /v1/wallet/status/{userId} | 查詢錢包餘額 | wallet (DB) |
-| GET /v1/wallet/exists/{userId} | 確認用戶是否存在 | wallet (DB) |
-| GET /v1/wallet/users | 列出已註冊用戶 ID | wallet (DB) |
+- Available and locked currency/energy balances.
+- Idempotent order reservation and rejection.
+- Explicit-transaction `TradeExecutedEvent` settlement.
+- Wallet integration outbox with broker confirms, retry/backoff, `FAILED`, and manual requeue.
+- TDA bid reservation, outbox-backed confirmation, and auction-result settlement.
 
-## Database Schema (wallet_service)
+Wallet does not own order state, matching, or MatchEngine completion state.
 
-**Table: wallets** — User wallet balances
-| Column | Type | Notes |
-|--------|------|-------|
-| id | BIGSERIAL PK | |
-| user_id | UUID UNIQUE NOT NULL | |
-| available_amount | INTEGER | Default 0 (tradable electricity units) |
-| locked_amount | INTEGER | Default 0 (reserved for pending orders) |
-| available_currency | INTEGER | Default 0 (tradable currency) |
-| locked_currency | INTEGER | Default 0 (reserved for pending orders) |
-| version | BIGINT NOT NULL | Default 0 (optimistic locking) |
-| update_time | TIMESTAMP | Default CURRENT_TIMESTAMP |
+## Current Flow
 
-**Table: outbox** — Outbox pattern for reliable event publishing
-| Column | Type | Notes |
-|--------|------|-------|
-| id | BIGSERIAL PK | |
-| event_type | VARCHAR(50) NOT NULL | e.g. OrderConfirmedEvent, OrderFailedEvent |
-| routing_key | VARCHAR(50) NOT NULL | RabbitMQ routing key |
-| payload | TEXT NOT NULL | JSON-serialized event |
-| status | VARCHAR(10) | Default 'PENDING'. Values: PENDING → SENT |
-| created_at | TIMESTAMP | Default CURRENT_TIMESTAMP |
-| Partial index on status='PENDING' for poller efficiency |
+```text
+OrderSubmittedEvent
+  -> insert-first order_id claim
+  -> reserve BUY currency or SELL energy
+  -> Wallet state + OrderConfirmed/OrderFailed outbox in one transaction
 
-## Outbox Pattern
+TradeExecutedEvent
+  -> one explicit DB transaction
+  -> lock buyer/seller Wallet rows in stable UUID order
+  -> update assets + validate postconditions
+  -> insert trade_settlements(trade_id)
+  -> ACK after commit
+```
 
-eap-wallet is the only service using the Outbox pattern. Business logic and event writing happen
-in the same DB transaction to avoid dual-write problems:
+Settlement does not publish `WalletTradeSettledEvent`. The rejected statement-autocommit experiment is not current behavior.
 
-1. `CreateOrderListener` receives `OrderSubmittedEvent` from RabbitMQ
-2. Validates balance → locks funds → writes `OrderConfirmedEvent` (or `OrderFailedEvent`) to outbox table
-3. `OutboxPoller` (`@Scheduled(fixedDelay = 500)`) reads PENDING rows (按 createdAt ASC) and publishes to RabbitMQ
-   - **fixedDelay**（非 fixedRate）：上一次執行完成後再等 500ms，不會疊加執行
-4. After successful publish, marks row as SENT
-5. 發布失敗時：catch block 僅 log error，不更新 status → PENDING 保留，下次 poll 自動重試（at-least-once 語意）
+## TDA Flow
 
-### Cleanup Job
+```text
+AuctionBidSubmittedEvent
+  -> reserve maximum auction exposure
+  -> Wallet outbox publishes AuctionBidConfirmedEvent
 
-`@Scheduled(fixedDelay = 3600000)` — 每小時執行一次：
-- 刪除 status = `SENT` 且 created_at > 24 小時前的記錄
-- **永不刪除 PENDING 記錄**，確保未發布的事件不會遺失
+AuctionClearedEvent
+  -> settle cleared quantity and release unused reservation
+```
 
-### Poller 停機恢復
+The TDA bid listener currently lacks a durable redelivery claim and publishes no rejection result for missing/insufficient Wallet state. Settlement is idempotent per auction/user/side but continues after participant failures. TDA has a distinct contract and no equivalent published CDA correctness/capacity result.
 
-Poller 隨 Spring Boot 生命週期運行。若服務重啟：
-- 所有 PENDING 記錄仍在 PostgreSQL 中，重啟後 500ms 內自動補發
-- 可能導致重複發布（at-least-once）→ 下游服務需具備冪等性（MatchEngine completion markers 使用資料庫唯一鍵保護）
+## RabbitMQ Consumers
 
-## RabbitMQ Listeners
+| Queue | Handler |
+| --- | --- |
+| `wallet.orderSubmitted.queue` | reserve assets and create confirmation/failure outbox |
+| `wallet.tradeExecuted.queue` | idempotent asset settlement |
+| `wallet.auctionBidSubmitted.queue` | reserve TDA bid assets and create confirmation outbox |
+| `wallet.auctionCleared.queue` | settle TDA auction results |
 
-| Queue | Listener Class | Handles |
-|-------|---------------|---------|
-| wallet.orderSubmitted.queue | CreateOrderListener | Balance check + lock funds → write Outbox |
-| wallet.tradeExecuted.queue | TradeExecutedListener | Settle matched trade → write WalletTradeSettled outbox |
+## Key Paths
 
-## Key Files
-
-| What | Path |
-|------|------|
-| Controllers | src/main/java/com/eap/eap_wallet/controller/ |
-| Listeners | src/main/java/com/eap/eap_wallet/listener/ |
-| Outbox Poller | src/main/java/com/eap/eap_wallet/application/OutboxPoller.java |
-| Liquibase | src/main/resources/db/changelog/ |
+- Listeners and outbox: `src/main/java/com/eap/eap_wallet/application/`
+- Wallet APIs: `src/main/java/com/eap/eap_wallet/controller/`
+- Liquibase: `src/main/resources/db/changelog/`

@@ -1,11 +1,11 @@
 # MQ 水平擴充 - 時序性與 Super Stream 遷移筆記
 
 > Wallet Outbox Relay 的完整問題背景、狀態機、publisher confirm、批次策略與 retry 設計，見 [`docs/outbox-relay-design.md`](./outbox-relay-design.md)。
-> 訂單入口的 queue depth admission control、503 policy 與驗證結果，見 [`docs/mq-backpressure-design.md`](./mq-backpressure-design.md)。
-> Order HTTP 到 Wallet Outbox 的 1,000 TPS 全鏈路測試與兩輪瓶頸分析，見 [`docs/order-wallet-e2e-load-test.md`](./order-wallet-e2e-load-test.md)。
+> 訂單入口的 queue depth admission control、503 policy 與驗證結果，見 [Order 的 MQ backpressure 文件](https://github.com/Yitin-tsai/eap-order/blob/main/docs/mq-backpressure-design.md)。
+> Order HTTP 到 Wallet Outbox 的歷史壓測設計，見 [Order/Wallet E2E 文件](https://github.com/Yitin-tsai/eap-order/blob/main/docs/order-wallet-e2e-load-test.md)。
 
 > 2026-05-05 ~ 05-06 討論紀錄
-> Current status: this note is historical. TPS-80 retired the legacy `order.matched` runtime bus, `wallet.orderMatched.queue`, `order.orderMatched.queue`, `MatchedOrderListener`, and `MatchEventListener`. Current matched-trade settlement uses `TradeExecutedEvent`, `OrderTradeAppliedEvent`, `WalletTradeSettledEvent`, and MatchEngine completion markers.
+> Current status: this note is historical. The legacy `order.matched` bus and later MatchEngine completion-marker feedback loop are both retired. Current Order and Wallet processing consumes `TradeExecutedEvent` and persists service-owned results without reporting completion back to MatchEngine. Tables and code examples below that use `order.matched` or RabbitMQ Super Streams are design history, not deployed topology.
 
 ---
 

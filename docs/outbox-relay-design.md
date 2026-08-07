@@ -3,6 +3,25 @@
 > 最後更新：2026-06-22  
 > 範圍：`eap-wallet` 的 transactional outbox 發布、RabbitMQ publisher confirm、批次 drain、失敗重試與監控。
 
+> 現行狀態（2026-08-07）：本文件的可靠性原則仍有效，但實作已增加 JDBC 批次標記、可設定的發布並行度、批次確認，以及預設關閉的實驗性非同步 relay。標準與壓測預設仍使用單一同步 poller；只有顯式啟用非同步模式時，才以 `IN_FLIGHT`、`SKIP LOCKED` 與逾時重新取得處理權。Wallet trade settlement 不會寫入此 outbox，也不會發布完成回授事件。
+>
+> TDA 的 `AuctionBidConfirmedEvent` 也使用 Wallet outbox；但 Order 的競價出價事件與 MatchEngine 的競價生命週期事件目前直接發布，因此不可把 Wallet 的局部 outbox 保證延伸成整條 TDA 的可靠性宣稱。
+
+### 現行發布狀態機
+
+```text
+PENDING
+  -> broker ACK 且可路由 -> SENT
+  -> 暫時失敗 -> PENDING + next_retry_at
+  -> 超過重試上限 -> FAILED
+
+實驗性非同步模式：
+PENDING -> IN_FLIGHT -> SENT / PENDING / FAILED
+              \-> lease timeout 後可重新取得
+```
+
+不論使用單筆相關確認或批次確認，只有 broker 確認成功且訊息可路由後才能標記 `SENT`。發布並行度、批次確認與非同步 relay 是執行設定，不是不同的業務語意；任何效能比較都必須記錄實際設定。
+
 ## 1. 要解決的問題
 
 Wallet 在同一個資料庫 transaction 內完成資產異動與 outbox 寫入，避免「DB 已提交，但後續事件沒有被建立」的 dual-write 問題。但原始 Outbox Poller 還有三個缺口。

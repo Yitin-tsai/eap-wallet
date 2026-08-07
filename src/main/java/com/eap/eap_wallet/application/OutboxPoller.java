@@ -500,7 +500,6 @@ public class OutboxPoller {
             case "OrderConfirmedEvent":
             case "OrderFailedEvent":
             case "AuctionBidConfirmedEvent":
-            case "WalletTradeSettledEvent":
                 MessageProperties properties = new MessageProperties();
                 properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);
                 properties.setContentEncoding(StandardCharsets.UTF_8.name());
@@ -514,7 +513,6 @@ public class OutboxPoller {
     private String resolveExchange(String eventType) {
         return switch (eventType) {
             case "AuctionBidConfirmedEvent" -> RabbitMQConstants.AUCTION_EXCHANGE;
-            case "WalletTradeSettledEvent" -> RabbitMQConstants.TRADE_EXCHANGE;
             default -> RabbitMQConstants.ORDER_EXCHANGE;
         };
     }
