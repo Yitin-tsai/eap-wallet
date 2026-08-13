@@ -23,7 +23,6 @@ import org.springframework.transaction.annotation.Transactional;
 import jakarta.annotation.PreDestroy;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.time.Instant;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
 import java.util.List;
@@ -116,19 +115,19 @@ public class OutboxPoller {
 
         boolean continueDraining;
         do {
-            Instant batchStartedAt = Instant.now();
+            long batchStartedAtNanos = System.nanoTime();
             List<OutboxRow> pending = selectPendingBatch();
             if (pending.isEmpty()) {
                 return;
             }
-            boolean batchSucceeded = processBatch(pending, "PENDING", batchStartedAt);
+            boolean batchSucceeded = processBatch(pending, "PENDING", batchStartedAtNanos);
             continueDraining = batchSucceeded && pending.size() == batchSize;
         } while (continueDraining);
     }
 
     private void pollAndPublishAsync() {
         while (asyncInFlightBatches.get() < asyncMaxInFlightBatches) {
-            Instant batchStartedAt = Instant.now();
+            long batchStartedAtNanos = System.nanoTime();
             List<OutboxRow> pending = claimBatchForAsyncRelay();
             if (pending.isEmpty()) {
                 return;
@@ -136,7 +135,7 @@ public class OutboxPoller {
             asyncInFlightBatches.incrementAndGet();
             asyncRelayExecutor.submit(() -> {
                 try {
-                    processBatch(pending, "IN_FLIGHT", batchStartedAt);
+                    processBatch(pending, "IN_FLIGHT", batchStartedAtNanos);
                 } finally {
                     asyncInFlightBatches.decrementAndGet();
                 }
@@ -145,7 +144,7 @@ public class OutboxPoller {
     }
 
     private List<OutboxRow> selectPendingBatch() {
-        Instant selectStartedAt = Instant.now();
+        long selectStartedAtNanos = System.nanoTime();
         try {
             return jdbcTemplate.query("""
                             SELECT id, event_type, routing_key, payload, attempt_count
@@ -158,12 +157,12 @@ public class OutboxPoller {
                     this::mapOutboxRow,
                     batchSize);
         } finally {
-            walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
+            walletMetrics.recordOutboxSelect(elapsedSince(selectStartedAtNanos));
         }
     }
 
     private List<OutboxRow> claimBatchForAsyncRelay() {
-        Instant selectStartedAt = Instant.now();
+        long selectStartedAtNanos = System.nanoTime();
         try {
             return namedJdbcTemplate.query("""
                     WITH candidate AS (
@@ -193,7 +192,7 @@ public class OutboxPoller {
                     .addValue("limit", batchSize)
                     .addValue("inFlightTimeoutSeconds", inFlightTimeoutSeconds), this::mapOutboxRow);
         } finally {
-            walletMetrics.recordOutboxSelect(Duration.between(selectStartedAt, Instant.now()));
+            walletMetrics.recordOutboxSelect(elapsedSince(selectStartedAtNanos));
         }
     }
 
@@ -206,19 +205,19 @@ public class OutboxPoller {
                 rs.getInt("attempt_count"));
     }
 
-    private boolean processBatch(List<OutboxRow> pending, String expectedStatus, Instant batchStartedAt) {
+    private boolean processBatch(List<OutboxRow> pending, String expectedStatus, long batchStartedAtNanos) {
         boolean batchSucceeded = true;
         List<PublishAttempt> attempts = new ArrayList<>(pending.size());
 
         List<PublishResult> publishResults = publishBatch(pending);
         for (PublishResult result : publishResults) {
             if (result.succeeded()) {
-                attempts.add(new PublishAttempt(result.entry(), result.correlationData(), result.startedAt()));
+                attempts.add(new PublishAttempt(result.entry(), result.correlationData(), result.startedAtNanos()));
             } else {
                 batchSucceeded = false;
                 walletMetrics.outboxPublishFailed();
                 recordFailure(result.entry(), result.failure(), expectedStatus);
-                walletMetrics.recordOutboxPublish(Duration.between(result.startedAt(), Instant.now()));
+                walletMetrics.recordOutboxPublish(elapsedSince(result.startedAtNanos()));
             }
         }
 
@@ -230,7 +229,7 @@ public class OutboxPoller {
         } else {
             for (PublishAttempt attempt : attempts) {
                 OutboxRow entry = attempt.entry();
-                Instant confirmStartedAt = Instant.now();
+                long confirmStartedAtNanos = System.nanoTime();
                 try {
                     awaitBrokerConfirmation(entry, attempt.correlationData(), confirmationDeadlineNanos);
                     confirmedAttempts.add(attempt);
@@ -243,9 +242,9 @@ public class OutboxPoller {
                     batchSucceeded = false;
                     walletMetrics.outboxPublishFailed();
                     recordFailure(entry, e, expectedStatus);
-                    walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), Instant.now()));
+                    walletMetrics.recordOutboxPublish(elapsedSince(attempt.startedAtNanos()));
                 } finally {
-                    walletMetrics.recordOutboxConfirm(Duration.between(confirmStartedAt, Instant.now()));
+                    walletMetrics.recordOutboxConfirm(elapsedSince(confirmStartedAtNanos));
                 }
             }
         }
@@ -259,11 +258,11 @@ public class OutboxPoller {
                     walletMetrics.outboxPublishFailed();
                     recordFailure(attempt.entry(), e, expectedStatus);
                     walletMetrics.recordOutboxPublish(
-                            Duration.between(attempt.startedAt(), Instant.now()));
+                            elapsedSince(attempt.startedAtNanos()));
                 }
             }
         }
-        walletMetrics.recordOutboxBatch(Duration.between(batchStartedAt, Instant.now()));
+        walletMetrics.recordOutboxBatch(elapsedSince(batchStartedAtNanos));
         return batchSucceeded;
     }
 
@@ -281,7 +280,7 @@ public class OutboxPoller {
             } catch (Exception e) {
                 int publishedOrFailed = results.size();
                 for (int i = publishedOrFailed; i < pending.size(); i++) {
-                    results.add(PublishResult.failure(pending.get(i), Instant.now(), e));
+                    results.add(PublishResult.failure(pending.get(i), System.nanoTime(), e));
                 }
             }
             return results;
@@ -310,7 +309,7 @@ public class OutboxPoller {
         } catch (Exception e) {
             int publishedOrFailed = results.size();
             for (int i = publishedOrFailed; i < chunk.size(); i++) {
-                results.add(PublishResult.failure(chunk.get(i), Instant.now(), e));
+                results.add(PublishResult.failure(chunk.get(i), System.nanoTime(), e));
             }
         }
         return results;
@@ -338,7 +337,7 @@ public class OutboxPoller {
         if (confirmableResults.isEmpty()) {
             return;
         }
-        Instant confirmStartedAt = Instant.now();
+        long confirmStartedAtNanos = System.nanoTime();
         try {
             operations.waitForConfirmsOrDie(confirmTimeoutMs);
             for (PublishResult result : confirmableResults) {
@@ -352,26 +351,25 @@ public class OutboxPoller {
                     .toList();
             results.removeIf(PublishResult::succeeded);
             for (OutboxRow row : rows) {
-                results.add(PublishResult.failure(row, Instant.now(), e));
+                results.add(PublishResult.failure(row, System.nanoTime(), e));
             }
         } finally {
-            Duration confirmDuration = Duration.between(confirmStartedAt, Instant.now());
-            walletMetrics.recordOutboxConfirm(confirmDuration);
+            walletMetrics.recordOutboxConfirm(elapsedSince(confirmStartedAtNanos));
         }
     }
 
     private PublishResult publishOne(OutboxRow entry, RabbitOperations operations) {
-        Instant startedAt = Instant.now();
-        Instant enqueueStartedAt = Instant.now();
+        long startedAtNanos = System.nanoTime();
+        long enqueueStartedAtNanos = System.nanoTime();
         try {
             String exchange = resolveExchange(entry.eventType());
             CorrelationData correlationData = new CorrelationData(Long.toString(entry.id()));
             operations.send(exchange, entry.routingKey(), toJsonMessage(entry), correlationData);
-            return PublishResult.success(entry, correlationData, startedAt);
+            return PublishResult.success(entry, correlationData, startedAtNanos);
         } catch (Exception e) {
-            return PublishResult.failure(entry, startedAt, e);
+            return PublishResult.failure(entry, startedAtNanos, e);
         } finally {
-            walletMetrics.recordOutboxPublishEnqueue(Duration.between(enqueueStartedAt, Instant.now()));
+            walletMetrics.recordOutboxPublishEnqueue(elapsedSince(enqueueStartedAtNanos));
         }
     }
 
@@ -430,7 +428,7 @@ public class OutboxPoller {
                 .map(attempt -> attempt.entry().id())
                 .toList();
         LocalDateTime updatedAt = LocalDateTime.now();
-        Instant markStartedAt = Instant.now();
+        long markStartedAtNanos = System.nanoTime();
         int marked;
         try {
             marked = namedJdbcTemplate.update("""
@@ -446,17 +444,17 @@ public class OutboxPoller {
                     .addValue("ids", ids)
                     .addValue("expectedStatus", expectedStatus));
         } finally {
-            walletMetrics.recordOutboxMarkSent(Duration.between(markStartedAt, Instant.now()));
+            walletMetrics.recordOutboxMarkSent(elapsedSince(markStartedAtNanos));
         }
         if (marked != ids.size()) {
             throw new IllegalStateException(
                     "Expected to mark " + ids.size() + " outbox records SENT, but updated " + marked);
         }
 
-        Instant completedAt = Instant.now();
+        long completedAtNanos = System.nanoTime();
         for (PublishAttempt attempt : confirmedAttempts) {
             walletMetrics.outboxPublished();
-            walletMetrics.recordOutboxPublish(Duration.between(attempt.startedAt(), completedAt));
+            walletMetrics.recordOutboxPublish(elapsedBetween(attempt.startedAtNanos(), completedAtNanos));
             log.debug("Outbox event published: id={}, type={}", attempt.entry().id(), attempt.entry().eventType());
         }
     }
@@ -468,6 +466,14 @@ public class OutboxPoller {
             return maxBackoffMs;
         }
         return Math.min(initialBackoffMs * multiplier, maxBackoffMs);
+    }
+
+    private static Duration elapsedSince(long startedAtNanos) {
+        return elapsedBetween(startedAtNanos, System.nanoTime());
+    }
+
+    static Duration elapsedBetween(long startedAtNanos, long completedAtNanos) {
+        return Duration.ofNanos(Math.max(0L, completedAtNanos - startedAtNanos));
     }
 
     private void awaitBrokerConfirmation(
@@ -523,24 +529,24 @@ public class OutboxPoller {
     private record PublishAttempt(
             OutboxRow entry,
             CorrelationData correlationData,
-            Instant startedAt) {
+            long startedAtNanos) {
     }
 
     private record PublishResult(
             OutboxRow entry,
             CorrelationData correlationData,
-            Instant startedAt,
+            long startedAtNanos,
             Exception failure) {
 
         static PublishResult success(
                 OutboxRow entry,
                 CorrelationData correlationData,
-                Instant startedAt) {
-            return new PublishResult(entry, correlationData, startedAt, null);
+                long startedAtNanos) {
+            return new PublishResult(entry, correlationData, startedAtNanos, null);
         }
 
-        static PublishResult failure(OutboxRow entry, Instant startedAt, Exception failure) {
-            return new PublishResult(entry, null, startedAt, failure);
+        static PublishResult failure(OutboxRow entry, long startedAtNanos, Exception failure) {
+            return new PublishResult(entry, null, startedAtNanos, failure);
         }
 
         boolean succeeded() {

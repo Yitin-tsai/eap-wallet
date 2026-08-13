@@ -18,8 +18,9 @@ import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 
-import java.util.List;
+import java.time.Duration;
 import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
@@ -36,6 +37,12 @@ import static org.mockito.Mockito.timeout;
 
 @ExtendWith(MockitoExtension.class)
 class OutboxPollerTest {
+
+    @Test
+    void elapsedBetween_shouldNeverReturnNegativeDuration() {
+        assertEquals(Duration.ZERO, OutboxPoller.elapsedBetween(10L, 1L));
+        assertEquals(Duration.ofNanos(9L), OutboxPoller.elapsedBetween(1L, 10L));
+    }
 
     @Mock
     private OutboxRepository outboxRepository;
