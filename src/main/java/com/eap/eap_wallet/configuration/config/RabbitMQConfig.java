@@ -19,6 +19,7 @@ import static com.eap.common.constants.RabbitMQConstants.*;
  * This module consumes:
  * - order.submitted events (for wallet validation)
  * - trade.executed events (for matched-trade settlement)
+ * - order.cancellation.result events (for releasing unmatched locked assets)
  * - auction.bid.submitted events (for auction fund locking)
  * - auction.cleared events (for auction settlement)
  *
@@ -76,6 +77,13 @@ public class RabbitMQConfig {
   }
 
   @Bean
+  public Queue walletOrderCancellationResultQueue() {
+    return QueueBuilder.durable(WALLET_ORDER_CANCELLATION_RESULT_QUEUE)
+        .withArgument("x-dead-letter-exchange", DEAD_LETTER_EXCHANGE)
+        .build();
+  }
+
+  @Bean
   public Binding walletOrderSubmittedBinding(@Qualifier("walletOrderSubmittedQueue") Queue walletOrderSubmittedQueue,
       @Qualifier("orderExchange") TopicExchange orderExchange) {
     return BindingBuilder.bind(walletOrderSubmittedQueue).to(orderExchange).with(ORDER_SUBMITTED_KEY);
@@ -86,6 +94,13 @@ public class RabbitMQConfig {
       @Qualifier("walletTradeExecutedQueue") Queue walletTradeExecutedQueue,
       @Qualifier("tradeExchange") TopicExchange tradeExchange) {
     return BindingBuilder.bind(walletTradeExecutedQueue).to(tradeExchange).with(TRADE_EXECUTED_KEY);
+  }
+
+  @Bean
+  public Binding walletOrderCancellationResultBinding(
+      @Qualifier("walletOrderCancellationResultQueue") Queue queue,
+      @Qualifier("orderExchange") TopicExchange orderExchange) {
+    return BindingBuilder.bind(queue).to(orderExchange).with(ORDER_CANCELLATION_RESULT_KEY);
   }
 
   // === Auction Exchange & Queues ===

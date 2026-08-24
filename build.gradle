@@ -1,7 +1,6 @@
 plugins {
     id 'org.springframework.boot' version '3.5.3'
     id 'io.spring.dependency-management' version '1.1.7'
-    id 'org.springframework.cloud.contract' version '4.3.0'
     id 'java'
 }
 
@@ -44,17 +43,6 @@ dependencies {
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.amqp:spring-rabbit-test'
-    testImplementation 'org.testcontainers:junit-jupiter'
-    testImplementation 'org.testcontainers:rabbitmq'
-    testImplementation 'org.testcontainers:postgresql'
-    testImplementation 'org.springframework.cloud:spring-cloud-starter-contract-verifier'
-    testImplementation 'org.springframework.integration:spring-integration-core'
-}
-
-tasks.named("generateContractTests") {
-    contractsDslDir = file("src/contractTest/resources/contracts")
-    basePackageForTests.set("com.eap.eap_wallet")
-    baseClassForTests.set("com.eap.eap_wallet.application.BaseContractTest")
 }
 
 tasks.named('test') {
@@ -92,6 +80,8 @@ tasks.register('walletPostgresIntegrationTest', Test) {
     systemProperty 'eap.integration.postgres.password', System.getProperty(
             'eap.integration.postgres.password', System.getenv('EAP_POSTGRES_IT_PASSWORD') ?: 'admin123')
     include '**/WalletTradeSettlementAppenderPostgresIT.class'
+    include '**/WalletCancellationSettlementOrderingPostgresIT.class'
+    include '**/CreateOrderListenerConcurrencyIT.class'
     shouldRunAfter tasks.named('test')
 }
 
@@ -100,25 +90,4 @@ tasks.register('walletAmqpLoadTest', JavaExec) {
     description = 'Publish OrderSubmittedEvent load directly through RabbitMQ AMQP for wallet throughput testing.'
     classpath = sourceSets.test.runtimeClasspath
     mainClass = 'com.eap.eap_wallet.loadtest.WalletAmqpLoadGenerator'
-}
-
-tasks.register('walletDbCeilingProbe', JavaExec) {
-    group = 'verification'
-    description = 'Measure isolated Wallet trade settlement SQL ceiling without RabbitMQ or Spring listener overhead.'
-    classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'com.eap.eap_wallet.loadtest.WalletDbCeilingProbe'
-}
-
-tasks.register('walletOrderSubmissionDbCeilingProbe', JavaExec) {
-    group = 'verification'
-    description = 'Measure isolated Wallet OrderSubmitted reservation SQL ceiling without RabbitMQ or Spring listener overhead.'
-    classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'com.eap.eap_wallet.loadtest.WalletOrderSubmissionDbCeilingProbe'
-}
-
-tasks.register('walletMixedDbCeilingProbe', JavaExec) {
-    group = 'verification'
-    description = 'Measure concurrent Wallet reservation and settlement SQL capacity on shared hot wallet rows.'
-    classpath = sourceSets.test.runtimeClasspath
-    mainClass = 'com.eap.eap_wallet.loadtest.WalletMixedDbCeilingProbe'
 }

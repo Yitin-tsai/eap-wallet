@@ -283,4 +283,22 @@
         </sql>
     </changeSet>
 
+    <changeSet id="wallet-020" author="eap">
+        <comment>Apply each accepted cancellation exactly once without adding writes to normal order and trade paths</comment>
+        <sql>
+            CREATE TABLE wallet_service.order_cancellation_applications (
+                cancellation_id UUID PRIMARY KEY,
+                order_id UUID NOT NULL UNIQUE,
+                user_id UUID NOT NULL,
+                side VARCHAR(4) NOT NULL,
+                limit_price INTEGER NOT NULL,
+                cancelled_quantity INTEGER NOT NULL,
+                applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT ck_wallet_order_cancellation_side CHECK (side IN ('BUY', 'SELL')),
+                CONSTRAINT ck_wallet_order_cancellation_price CHECK (limit_price &gt; 0),
+                CONSTRAINT ck_wallet_order_cancellation_quantity CHECK (cancelled_quantity &gt; 0)
+            );
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>

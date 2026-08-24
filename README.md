@@ -16,6 +16,11 @@ TradeExecutedEvent
   -> validate postconditions
   -> persist one trade_settlements fact per trade_id
   -> manual ACK after commit
+
+OrderCancellationResultEvent(CANCELLED)
+  -> lock the affected Wallet
+  -> release only MatchEngine's atomically confirmed unmatched quantity
+  -> store one cancellation application for duplicate-safe delivery
 ```
 
 TDA uses a separate event flow:
@@ -39,6 +44,7 @@ Wallet settlement does not report completion back to MatchEngine. Wallet's durab
 | --- | --- |
 | Available and locked currency/energy | Order lifecycle |
 | Order reservation and rejection decisions | Matching or deal price selection |
+| Cancellation application and resulting asset release | Cancellation arbitration and order remainder |
 | Idempotent trade settlement | Cross-service completion state |
 | Wallet integration-event outbox and retry state | AI or client orchestration |
 | TDA bid reservation and auction-result settlement | Auction scheduling or clearing-price calculation |
@@ -49,8 +55,11 @@ Wallet settlement does not report completion back to MatchEngine. Wallet's durab
 - Settlement keeps an explicit transaction; the rejected autocommit experiment is not current behavior.
 - Stable UUID lock ordering protects reversed buyer/seller concurrency from deadlocks.
 - Unique keys and idempotency claims absorb RabbitMQ redelivery.
+- Trade settlement and cancellation apply disjoint, idempotent asset deltas, so either delivery order converges to the same balances.
 - Outbox publisher confirms, retry metadata, terminal `FAILED` state, and manual requeue make publication failure visible.
 - TDA bid confirmation uses the Wallet outbox, but reservation redelivery, rejection feedback, and whole-auction convergence remain open gaps; the wider TDA path has not passed the CDA capacity and recovery contract.
+
+Wallet trusts MatchEngine's immutable cancellation result for the exact unmatched quantity, as it already trusts `TradeExecuted` for matched quantity. Wallet still derives and guards the balance update locally; cancellation persistence is absent from normal order and trade write paths.
 
 ## Run
 

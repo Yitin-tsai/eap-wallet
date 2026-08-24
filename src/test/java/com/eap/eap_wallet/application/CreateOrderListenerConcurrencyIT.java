@@ -22,20 +22,25 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.context.DynamicPropertyRegistry;
+import org.springframework.test.context.DynamicPropertySource;
 
-@SpringBootTest(properties = {
-    "spring.datasource.url=jdbc:postgresql://localhost:5432/eapdb",
-    "spring.datasource.username=admin",
-    "spring.datasource.password=admin123",
-    "spring.datasource.driver-class-name=org.postgresql.Driver",
-    "spring.jpa.hibernate.ddl-auto=validate",
-    "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.PostgreSQLDialect",
-    "spring.rabbitmq.listener.simple.auto-startup=false",
-    "spring.liquibase.contexts=dev",
-    "spring.liquibase.drop-first=false"
-})
+@SpringBootTest(properties = "spring.rabbitmq.listener.simple.auto-startup=false")
 @EnabledIfSystemProperty(named = "eap.integration.postgres", matches = "true")
 class CreateOrderListenerConcurrencyIT {
+
+    @DynamicPropertySource
+    static void postgresProperties(DynamicPropertyRegistry registry) {
+        registry.add("spring.datasource.url", () -> System.getProperty(
+                "eap.integration.postgres.url", "jdbc:postgresql://localhost:15433/eap_wallet_db"));
+        registry.add("spring.datasource.username", () -> System.getProperty(
+                "eap.integration.postgres.user", "admin"));
+        registry.add("spring.datasource.password", () -> System.getProperty(
+                "eap.integration.postgres.password", "admin123"));
+        registry.add("spring.jpa.hibernate.ddl-auto", () -> "validate");
+        registry.add("spring.liquibase.contexts", () -> "dev");
+        registry.add("spring.liquibase.drop-first", () -> "false");
+    }
 
     @Autowired
     private CreateOrderListener createOrderListener;
