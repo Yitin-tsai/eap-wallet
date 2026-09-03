@@ -1,6 +1,6 @@
 package com.eap.eap_wallet.application;
 
-import com.eap.common.event.OrderConfirmedEvent;
+import com.eap.common.event.OrderAssetReservationSucceededEvent;
 import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -339,11 +339,11 @@ class OutboxPollerTest {
     }
 
     private OutboxPoller.OutboxRow pendingEntry(Long id, int attemptCount) throws Exception {
-        OrderConfirmedEvent event = new OrderConfirmedEvent();
+        OrderAssetReservationSucceededEvent event = new OrderAssetReservationSucceededEvent();
         return new OutboxPoller.OutboxRow(
                 id,
-                "OrderConfirmedEvent",
-                "order.confirmed",
+                "OrderAssetReservationSucceededEvent",
+                "order.asset-reservation.succeeded",
                 new ObjectMapper().writeValueAsString(event),
                 attemptCount);
     }

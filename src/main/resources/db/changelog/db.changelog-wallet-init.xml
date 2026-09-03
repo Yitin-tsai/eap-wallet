@@ -301,4 +301,112 @@
         </sql>
     </changeSet>
 
+    <changeSet id="wallet-021" author="eap">
+        <comment>Persist critical Order messages before Wallet business processing and retry them with leases</comment>
+        <sql>
+            CREATE TABLE wallet_service.message_inbox (
+                message_type VARCHAR(40) NOT NULL,
+                message_id UUID NOT NULL,
+                payload TEXT NOT NULL,
+                payload_hash VARCHAR(64) NOT NULL,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                status VARCHAR(30) NOT NULL DEFAULT 'PENDING',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                claimed_by VARCHAR(80),
+                claim_until TIMESTAMP,
+                received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                applied_at TIMESTAMP,
+                error_type VARCHAR(80),
+                last_error TEXT,
+                conflict_detected_at TIMESTAMP,
+                conflicting_payload TEXT,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (message_type, message_id),
+                CONSTRAINT ck_wallet_message_inbox_type
+                    CHECK (message_type IN ('ORDER_SUBMITTED', 'ORDER_CANCELLATION_RESULT')),
+                CONSTRAINT ck_wallet_message_inbox_status
+                    CHECK (status IN ('PENDING', 'PENDING_PREREQUISITE', 'IN_PROGRESS',
+                                      'APPLIED', 'FAILED_RETRYABLE', 'FAILED_PERMANENT')),
+                CONSTRAINT ck_wallet_message_inbox_attempt CHECK (attempt_count &gt;= 0),
+                CONSTRAINT ck_wallet_message_inbox_schema CHECK (schema_version &gt; 0)
+            );
+
+            CREATE INDEX idx_wallet_message_inbox_retry
+                ON wallet_service.message_inbox(status, next_retry_at, updated_at)
+                WHERE status IN ('PENDING', 'PENDING_PREREQUISITE',
+                                 'FAILED_RETRYABLE', 'IN_PROGRESS');
+
+            CREATE TABLE wallet_service.order_asset_release_publications (
+                cancellation_id UUID PRIMARY KEY,
+                event_id UUID NOT NULL UNIQUE,
+                order_id UUID NOT NULL UNIQUE,
+                recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        </sql>
+    </changeSet>
+
+    <changeSet id="wallet-022" author="eap">
+        <comment>Remove the unused Wallet prerequisite state; asset shortfalls are permanent consistency conflicts</comment>
+        <sql>
+            UPDATE wallet_service.message_inbox
+            SET status = 'FAILED_PERMANENT',
+                error_type = 'PERMANENT_ASSET_INVARIANT',
+                last_error = COALESCE(last_error,
+                    'Wallet prerequisite state retired: manual consistency review required'),
+                claimed_by = NULL,
+                claim_until = NULL,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE status = 'PENDING_PREREQUISITE';
+
+            ALTER TABLE wallet_service.message_inbox
+                DROP CONSTRAINT ck_wallet_message_inbox_status;
+            ALTER TABLE wallet_service.message_inbox
+                ADD CONSTRAINT ck_wallet_message_inbox_status
+                CHECK (status IN ('PENDING', 'IN_PROGRESS', 'APPLIED',
+                                  'FAILED_RETRYABLE', 'FAILED_PERMANENT'));
+
+            DROP INDEX wallet_service.idx_wallet_message_inbox_retry;
+            CREATE INDEX idx_wallet_message_inbox_retry
+                ON wallet_service.message_inbox(status, next_retry_at, updated_at)
+                WHERE status IN ('PENDING', 'FAILED_RETRYABLE', 'IN_PROGRESS');
+        </sql>
+    </changeSet>
+
+    <changeSet id="wallet-023" author="eap">
+        <comment>Enforce non-negative aggregate Wallet balances as the database safety boundary</comment>
+        <sql>
+            ALTER TABLE wallet_service.wallets
+                ADD CONSTRAINT ck_wallet_available_amount_non_negative
+                    CHECK (available_amount &gt;= 0) NOT VALID,
+                ADD CONSTRAINT ck_wallet_locked_amount_non_negative
+                    CHECK (locked_amount &gt;= 0) NOT VALID,
+                ADD CONSTRAINT ck_wallet_available_currency_non_negative
+                    CHECK (available_currency &gt;= 0) NOT VALID,
+                ADD CONSTRAINT ck_wallet_locked_currency_non_negative
+                    CHECK (locked_currency &gt;= 0) NOT VALID;
+
+            ALTER TABLE wallet_service.wallets
+                VALIDATE CONSTRAINT ck_wallet_available_amount_non_negative;
+            ALTER TABLE wallet_service.wallets
+                VALIDATE CONSTRAINT ck_wallet_locked_amount_non_negative;
+            ALTER TABLE wallet_service.wallets
+                VALIDATE CONSTRAINT ck_wallet_available_currency_non_negative;
+            ALTER TABLE wallet_service.wallets
+                VALIDATE CONSTRAINT ck_wallet_locked_currency_non_negative;
+        </sql>
+    </changeSet>
+
+    <changeSet id="wallet-024" author="eap">
+        <comment>Rename the Wallet asset-reservation success integration contract</comment>
+        <sql>
+            UPDATE wallet_service.outbox
+            SET event_type = 'OrderAssetReservationSucceededEvent',
+                routing_key = 'order.asset-reservation.succeeded',
+                updated_at = CURRENT_TIMESTAMP
+            WHERE event_type = 'OrderConfirmedEvent'
+              AND status &lt;&gt; 'SENT';
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>

@@ -1,10 +1,8 @@
 package com.eap.eap_wallet.controller;
 
-import com.eap.common.event.OrderConfirmedEvent;
 import com.eap.common.dto.UserRegistrationResponse;
 import com.eap.common.dto.WalletStatusResponse;
 import com.eap.eap_wallet.application.UserRegistrationService;
-import com.eap.eap_wallet.application.WalletCheckService;
 import com.eap.eap_wallet.domain.entity.WalletEntity;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,15 +18,7 @@ import java.util.UUID;
 public class WalletController {
 
     @Autowired
-    WalletCheckService walletCheckService;
-
-    @Autowired
     UserRegistrationService userRegistrationService;
-
-    @PostMapping("/check")
-    public boolean checkWallet(@RequestBody OrderConfirmedEvent event) {
-        return walletCheckService.checkWallet(event);
-    }
 
     /**
      * 用戶註冊 - 創建新錢包

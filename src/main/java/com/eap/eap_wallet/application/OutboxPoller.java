@@ -503,8 +503,9 @@ public class OutboxPoller {
 
     private Message toJsonMessage(OutboxRow entry) {
         switch (entry.eventType()) {
-            case "OrderConfirmedEvent":
+            case "OrderAssetReservationSucceededEvent":
             case "OrderFailedEvent":
+            case "OrderAssetReservationReleasedEvent":
             case "AuctionBidConfirmedEvent":
                 MessageProperties properties = new MessageProperties();
                 properties.setContentType(MessageProperties.CONTENT_TYPE_JSON);

@@ -42,7 +42,7 @@ read PENDING
 - Exchange 找得到符合 routing key 的 binding。
 - 訊息確實進入至少一個 queue。
 
-實測時只啟動 wallet，沒有啟動 order / matchEngine，下游 binding 不存在。舊版仍會將 `order.confirmed` 標成 `SENT`，造成資料庫看似成功、實際訊息遺失。
+實測時只啟動 wallet，沒有啟動 order / matchEngine，下游 binding 不存在。舊版仍會將 `order.asset-reservation.succeeded` 標成 `SENT`，造成資料庫看似成功、實際訊息遺失。
 
 ### 1.2 無上限查詢與固定等待限制吞吐
 
@@ -392,7 +392,7 @@ docker run --rm --entrypoint promtool \
 建議使用非正式環境執行：
 
 1. 啟動 wallet、Prometheus 與 Grafana。
-2. 暫時移除 `order.confirmed` 的測試 binding，或將事件送往沒有 binding 的 routing key。
+2. 暫時移除 `order.asset-reservation.succeeded` 的測試 binding，或將事件送往沒有 binding 的 routing key。
 3. 確認 publish failure 與 retry metrics 增加。
 4. 等待 retry 上限，確認 `FAILED` stat 與 `WalletOutboxFailedEvents` 進入 firing。
 5. 恢復 binding。

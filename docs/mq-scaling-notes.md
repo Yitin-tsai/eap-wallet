@@ -204,7 +204,7 @@ where available_currency < 0
 
 ### 2026-06-22 實測結果：Outbox Relay v2
 
-第一輪驗證 publisher confirm 時發現，只啟動 wallet 的壓測環境沒有啟動 order / matchEngine，因此 `order.confirmed` 與 `order.failed` 沒有下游 binding。舊 relay 呼叫 `convertAndSend()` 後就標記 `SENT`，會把 unroutable message 誤判為成功；v2 啟用 mandatory return + correlated publisher confirm 後，正確將這些事件保留為 `PENDING`。這表示先前的 outbox drain 數字只能證明資料列被標記完成，不能證明訊息已被 broker 路由。
+第一輪驗證 publisher confirm 時發現，只啟動 wallet 的壓測環境沒有啟動 order / matchEngine，因此 `order.asset-reservation.succeeded` 與 `order.failed` 沒有下游 binding。舊 relay 呼叫 `convertAndSend()` 後就標記 `SENT`，會把 unroutable message 誤判為成功；v2 啟用 mandatory return + correlated publisher confirm 後，正確將這些事件保留為 `PENDING`。這表示先前的 outbox drain 數字只能證明資料列被標記完成，不能證明訊息已被 broker 路由。
 
 為了隔離量測 relay，本輪在 `order.exchange` 建立臨時 load-test sink queue。第一版固定批次實測：
 
@@ -307,7 +307,7 @@ thread pool: 32 -> 64
 
 ```text
 同一 orderId 只能有一筆 idempotency record
-同一 orderId 只能有一筆 OrderConfirmedEvent 或 OrderFailedEvent
+同一 orderId 只能有一筆 OrderAssetReservationSucceededEvent 或 OrderFailedEvent
 wallet available + locked 總額不可錯
 availableCurrency / availableAmount 不可變負數
 duplicate event 不可造成重複鎖資產
@@ -404,7 +404,7 @@ eap-order                   order.exchange (Topic)
   PlaceSellOrderService -->
 
 eap-wallet (via Outbox)
-  OrderConfirmed        --> routing: order.confirmed --+--> matchEngine.orderConfirmed.queue --> eap-matchEngine OrderConfirmedListener
+  OrderConfirmed        --> routing: order.asset-reservation.succeeded --+--> matchEngine.orderConfirmed.queue --> eap-matchEngine OrderAssetReservationSucceededListener
                                                        +--> order.orderConfirmed.queue -------> eap-order OrderStatusUpdateListener
 
   OrderFailed           --> routing: order.failed --------> order.orderFailed.queue ----------> eap-order OrderStatusUpdateListener
@@ -494,9 +494,9 @@ eap-order                        order.submitted.stream [P0|P1|P2]
   PlaceSellOrderService -->          +-- group: "wallet"  ----------------> eap-wallet CreateOrderListener
 
 
-eap-wallet (via Outbox)          order.confirmed.stream [P0|P1|P2]
+eap-wallet (via Outbox)          order.asset-reservation.succeeded.stream [P0|P1|P2]
   OrderConfirmed        -->        partition by: userId
-                                     +-- group: "matchEngine" -----------> eap-matchEngine OrderConfirmedListener
+                                     +-- group: "matchEngine" -----------> eap-matchEngine OrderAssetReservationSucceededListener
                                      +-- group: "order" -----------------> eap-order OrderStatusUpdateListener
 
                                  order.failed.stream [P0|P1|P2]
@@ -517,7 +517,7 @@ eap-matchEngine                  trade.executed.stream [P0|P1|P2]
 | 事件 | 現在 | Super Stream |
 |------|------|-------------|
 | order.submitted | 1 routing key -> 1 queue -> 1 consumer | 1 stream x 3 partitions -> group:"wallet" |
-| order.confirmed | 1 routing key -> 2 queues -> 2 consumers | 1 stream x 3 partitions -> group:"matchEngine" + group:"order" |
+| order.asset-reservation.succeeded | 1 routing key -> 2 queues -> 2 consumers | 1 stream x 3 partitions -> group:"matchEngine" + group:"order" |
 | order.failed | 1 routing key -> 1 queue -> 1 consumer | 1 stream x 3 partitions -> group:"order" |
 | order.matched | 1 routing key -> 2 queues -> 2 consumers | 1 stream x 3 partitions -> group:"order" + group:"wallet" |
 
@@ -547,7 +547,7 @@ Super Stream：
 public class StreamConstants {
     // Stream names
     public static final String ORDER_SUBMITTED_STREAM = "order.submitted.stream";
-    public static final String ORDER_CONFIRMED_STREAM = "order.confirmed.stream";
+    public static final String ORDER_CONFIRMED_STREAM = "order.asset-reservation.succeeded.stream";
     public static final String ORDER_FAILED_STREAM    = "order.failed.stream";
     public static final String ORDER_MATCHED_STREAM   = "order.matched.stream";
 

@@ -82,6 +82,8 @@ tasks.register('walletPostgresIntegrationTest', Test) {
     include '**/WalletTradeSettlementAppenderPostgresIT.class'
     include '**/WalletCancellationSettlementOrderingPostgresIT.class'
     include '**/CreateOrderListenerConcurrencyIT.class'
+    include '**/WalletMessageInboxPostgresIT.class'
+    include '**/WalletMessageProcessorPostgresIT.class'
     shouldRunAfter tasks.named('test')
 }
 

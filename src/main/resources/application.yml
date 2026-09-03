@@ -75,6 +75,16 @@ eap:
         concurrency: 8
       trade-executed:
         concurrency: 4
+      order-cancellation-result:
+        concurrency: 4
+    inbox-reconciler:
+      batch-size: 100
+      poll-interval-ms: 100
+      initial-delay-ms: 500
+      lease-ms: 30000
+      max-attempts: 20
+      initial-backoff-ms: 250
+      max-backoff-ms: 30000
     outbox-admin:
       enabled: false
     outbox-relay:

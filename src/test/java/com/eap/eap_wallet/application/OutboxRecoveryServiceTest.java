@@ -74,7 +74,7 @@ class OutboxRecoveryServiceTest {
     }
 
     private OutboxEntity failedEntry(Long id) {
-        OutboxEntity entry = new OutboxEntity("OrderConfirmedEvent", "order.confirmed", "{}");
+        OutboxEntity entry = new OutboxEntity("OrderAssetReservationSucceededEvent", "order.asset-reservation.succeeded", "{}");
         entry.setStatus("FAILED");
         entry.setAttemptCount(10);
         entry.setLastError("AmqpException: unroutable");

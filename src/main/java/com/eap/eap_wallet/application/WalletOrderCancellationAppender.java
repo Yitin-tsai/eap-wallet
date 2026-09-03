@@ -87,8 +87,24 @@ public class WalletOrderCancellationAppender {
             return outcome;
         }
         if (!outcome.completed()) {
-            throw new IllegalStateException("Wallet cancellation release did not apply exactly once: cancellationId="
-                    + event.getCancellationId() + ", orderId=" + event.getOrderId() + ", outcome=" + outcome);
+            if (outcome.existingApplications() > 0) {
+                throw new WalletMessageIdentityConflictException(
+                        "Wallet cancellation identity conflicts with an existing application: cancellationId="
+                                + event.getCancellationId() + ", orderId=" + event.getOrderId()
+                                + ", outcome=" + outcome);
+            }
+            if (outcome.insertedApplications() == 1 && outcome.walletUpdates() == 0) {
+                throw new WalletAssetConsistencyException(
+                        "Wallet cancellation release exceeds locked assets: cancellationId="
+                                + event.getCancellationId() + ", orderId=" + event.getOrderId()
+                                + ", side=" + event.getOrderType()
+                                + ", cancelledAmount=" + event.getCancelledAmount()
+                                + ", outcome=" + outcome);
+            }
+            throw new WalletMessageIdentityConflictException(
+                    "Wallet cancellation cannot find the expected wallet/reservation identity: cancellationId="
+                            + event.getCancellationId() + ", orderId=" + event.getOrderId()
+                            + ", outcome=" + outcome);
         }
         return outcome;
     }

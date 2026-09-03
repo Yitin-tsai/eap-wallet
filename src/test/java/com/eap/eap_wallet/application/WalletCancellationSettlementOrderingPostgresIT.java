@@ -138,7 +138,7 @@ class WalletCancellationSettlementOrderingPostgresIT {
     void reusedCancellationIdWithDifferentAmount_shouldFailIdentityCheck() {
         assertTrue(cancel().completed());
 
-        assertThrows(IllegalStateException.class, () -> transaction.execute(
+        assertThrows(WalletMessageIdentityConflictException.class, () -> transaction.execute(
                 status -> cancellationAppender.release(cancellationEvent(5))));
 
         assertApplication(cancellationId, buyerOrderId, 6);
@@ -151,7 +151,7 @@ class WalletCancellationSettlementOrderingPostgresIT {
         OrderCancellationResultEvent conflict = cancellationEvent(6);
         conflict.setCancellationId(UUID.randomUUID());
 
-        assertThrows(IllegalStateException.class, () -> transaction.execute(
+        assertThrows(WalletMessageIdentityConflictException.class, () -> transaction.execute(
                 status -> cancellationAppender.release(conflict)));
 
         assertApplication(cancellationId, buyerOrderId, 6);
