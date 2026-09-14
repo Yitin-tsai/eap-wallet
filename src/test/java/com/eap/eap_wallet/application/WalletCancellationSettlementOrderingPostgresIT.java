@@ -15,6 +15,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
+import java.nio.charset.StandardCharsets;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -71,7 +72,8 @@ class WalletCancellationSettlementOrderingPostgresIT {
             return;
         }
         jdbc.update("DELETE FROM wallet_service.trade_settlements WHERE trade_id LIKE ?", tradeId + "%");
-        jdbc.update("DELETE FROM wallet_service.order_cancellation_applications WHERE order_id = ?", buyerOrderId);
+        jdbc.update("DELETE FROM wallet_service.order_cancellation_applications WHERE order_id IN (?, ?)",
+                buyerOrderId, sellerOrderId);
         jdbc.update("DELETE FROM wallet_service.wallets WHERE user_id IN (?, ?)", buyerId, sellerId);
     }
 
@@ -168,8 +170,67 @@ class WalletCancellationSettlementOrderingPostgresIT {
         assertFinalState();
     }
 
+    @Test
+    void sellCancellationBeforeTradeSettlement_shouldConverge() {
+        seedAdditionalSellerReservation();
+        assertTrue(sellCancel().completed());
+        assertWallet(sellerId, 6, 4, 0, 0);
+
+        assertTrue(settle().completed());
+
+        assertSellCancellationFinalState();
+    }
+
+    @Test
+    void tradeSettlementBeforeSellCancellation_shouldConverge() {
+        seedAdditionalSellerReservation();
+        assertTrue(settle().completed());
+
+        assertTrue(sellCancel().completed());
+
+        assertSellCancellationFinalState();
+    }
+
+    @RepeatedTest(10)
+    void concurrentSellCancellationAndSettlement_shouldConverge() throws Exception {
+        seedAdditionalSellerReservation();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<WalletOrderCancellationAppender.CancellationOutcome> cancellation = executor.submit(() -> {
+                start.await();
+                return sellCancel();
+            });
+            Future<WalletTradeSettlementAppender.SettlementOutcome> settlement = executor.submit(() -> {
+                start.await();
+                return settle();
+            });
+
+            start.countDown();
+
+            assertTrue(cancellation.get(10, TimeUnit.SECONDS).completed());
+            assertTrue(settlement.get(10, TimeUnit.SECONDS).completed());
+            assertSellCancellationFinalState();
+        } finally {
+            executor.shutdownNow();
+            assertTrue(executor.awaitTermination(5, TimeUnit.SECONDS));
+        }
+    }
+
     private WalletOrderCancellationAppender.CancellationOutcome cancel() {
         return transaction.execute(status -> cancellationAppender.release(cancellationEvent()));
+    }
+
+    private WalletOrderCancellationAppender.CancellationOutcome sellCancel() {
+        return transaction.execute(status -> cancellationAppender.release(sellCancellationEvent()));
+    }
+
+    private void seedAdditionalSellerReservation() {
+        jdbc.update("""
+                UPDATE wallet_service.wallets
+                SET locked_amount = locked_amount + 6
+                WHERE user_id = ?
+                """, sellerId);
     }
 
     private WalletTradeSettlementAppender.SettlementOutcome settle() {
@@ -178,7 +239,10 @@ class WalletCancellationSettlementOrderingPostgresIT {
 
     private WalletTradeSettlementAppender.SettlementOutcome settle(String suffix, int quantity) {
         TradeExecutedEvent event = tradeEvent(suffix, quantity);
-        return transaction.execute(status -> settlementAppender.append(event, event.getOccurredAt()));
+        return transaction.execute(status -> settlementAppender.append(
+                event,
+                event.getOccurredAt(),
+                UUID.nameUUIDFromBytes(event.getTradeId().getBytes(StandardCharsets.UTF_8)).toString()));
     }
 
     private OrderCancellationResultEvent cancellationEvent() {
@@ -194,6 +258,19 @@ class WalletCancellationSettlementOrderingPostgresIT {
                 .orderType("BUY")
                 .limitPrice(100)
                 .cancelledAmount(cancelledAmount)
+                .decidedAt(LocalDateTime.now())
+                .build();
+    }
+
+    private OrderCancellationResultEvent sellCancellationEvent() {
+        return OrderCancellationResultEvent.builder()
+                .cancellationId(cancellationId)
+                .orderId(sellerOrderId)
+                .userId(sellerId)
+                .outcome(OrderCancellationResultEvent.CANCELLED)
+                .orderType("SELL")
+                .limitPrice(90)
+                .cancelledAmount(6)
                 .decidedAt(LocalDateTime.now())
                 .build();
     }
@@ -218,6 +295,12 @@ class WalletCancellationSettlementOrderingPostgresIT {
         assertApplication(cancellationId, buyerOrderId, 6);
         assertWallet(buyerId, 4, 0, 640, 0);
         assertWallet(sellerId, 0, 0, 360, 0);
+    }
+
+    private void assertSellCancellationFinalState() {
+        assertApplication(cancellationId, sellerOrderId, 6);
+        assertWallet(buyerId, 4, 0, 40, 600);
+        assertWallet(sellerId, 6, 0, 360, 0);
     }
 
     private void assertApplication(UUID expectedCancellationId, UUID orderId, int cancelledQuantity) {

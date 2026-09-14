@@ -6,11 +6,8 @@ import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.amqp.rabbit.annotation.RabbitListener;
 import org.springframework.stereotype.Component;
-import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
-import java.time.LocalDateTime;
 
 import static com.eap.common.constants.RabbitMQConstants.WALLET_TRADE_EXECUTED_QUEUE;
 
@@ -19,8 +16,7 @@ import static com.eap.common.constants.RabbitMQConstants.WALLET_TRADE_EXECUTED_Q
 @Slf4j
 public class TradeExecutedListener {
 
-    private final WalletTradeSettlementAppender settlementAppender;
-    private final PlatformTransactionManager transactionManager;
+    private final WalletMessageInbox inbox;
     private final WalletMetrics walletMetrics;
 
     @RabbitListener(
@@ -33,37 +29,16 @@ public class TradeExecutedListener {
                 event.getTradeId(), event.getLegacyMatchId());
 
         try {
-            LocalDateTime settledAt = event.getOccurredAt() == null ? LocalDateTime.now() : event.getOccurredAt();
-            long transactionStartedAt = System.nanoTime();
-            try {
-                new TransactionTemplate(transactionManager)
-                        .executeWithoutResult(status -> settle(event, settledAt));
-            } catch (RuntimeException e) {
-                walletMetrics.tradeSettlementFailed();
-                throw e;
-            } finally {
-                walletMetrics.recordTradeSettlementTransaction(
-                        Duration.ofNanos(System.nanoTime() - transactionStartedAt));
+            WalletMessageInbox.ReceiveOutcome outcome = inbox.receiveTradeExecuted(event);
+            if (outcome == WalletMessageInbox.ReceiveOutcome.CONFLICT) {
+                log.error("Durable Wallet inbox trade identity conflict: tradeId={}", event.getTradeId());
+            } else if (outcome == WalletMessageInbox.ReceiveOutcome.DUPLICATE) {
+                walletMetrics.tradeInboxDuplicate();
             }
         } finally {
             walletMetrics.recordTradeSettlementProcessing(
                     Duration.ofNanos(System.nanoTime() - processingStartedAt));
         }
-    }
-
-    private void settle(TradeExecutedEvent event, LocalDateTime settledAt) {
-        WalletTradeSettlementAppender.SettlementOutcome outcome =
-                settlementAppender.append(event, settledAt);
-        if (outcome.duplicate()) {
-            walletMetrics.tradeSettlementDuplicateSkipped();
-            log.debug("Trade already settled, skipping duplicate: tradeId={}", event.getTradeId());
-            return;
-        }
-
-        walletMetrics.tradeSettlementCompleted();
-        log.debug("Trade wallet settlement completed: tradeId={}, buyerId={}, sellerId={}, dealCurrency={}, quantity={}",
-                event.getTradeId(), event.getBuyerId(), event.getSellerId(),
-                outcome.dealCurrency(), event.getQuantity());
     }
 
 }

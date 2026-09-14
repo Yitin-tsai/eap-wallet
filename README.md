@@ -13,11 +13,12 @@ OrderSubmittedEvent
   -> write Wallet state + OrderAssetReservationSucceeded/OrderFailed outbox + inbox APPLIED atomically
 
 TradeExecutedEvent
-  -> settle one trade inside one explicit DB transaction
+  -> persist wallet_service.message_inbox, then ACK delivery
+  -> lease worker claims the durable trade
   -> lock buyer/seller Wallet rows in stable UUID order
   -> validate postconditions
   -> persist one trade_settlements fact per trade_id
-  -> manual ACK after commit
+  -> commit balance updates + trade_settlements + inbox APPLIED atomically
 
 OrderCancellationResultEvent(CANCELLED)
   -> persist wallet_service.message_inbox, then ACK delivery
@@ -58,11 +59,14 @@ Wallet settlement does not report completion back to MatchEngine. Wallet's durab
 
 - Reservation changes and confirmation/failure outbox rows share one local transaction.
 - Reservation feasibility is part of the final conditional Wallet update, so concurrent distinct orders cannot reuse a stale balance check; the database also rejects negative available or locked balances.
-- `OrderSubmittedEvent` and `OrderCancellationResultEvent` are persisted in `wallet_service.message_inbox` before business processing; listener return means durable intake, not business completion.
+- `OrderSubmittedEvent`, `OrderCancellationResultEvent`, and `TradeExecutedEvent` are persisted in `wallet_service.message_inbox` before business processing; listener return means durable intake, not business completion.
 - The inbox reconciler uses `FOR UPDATE SKIP LOCKED`, a 30-second lease, owner fencing, exponential backoff, bounded jitter, and transient/permanent error classes.
+- Inbox status counts, identity conflicts, oldest unresolved age, and duplicate trade intake are observable. The disabled-by-default `/internal/inbox/messages` endpoint exposes attempt, lease, and error metadata without returning event payloads, and is restricted to `local`, `test`, or `loadtest` profiles.
 - A cancellation release larger than the current locked asset is a permanent consistency conflict, not a prerequisite retry. The whole processing transaction rolls back and no release event is published.
 - Reservation/rejection or cancellation release, business idempotency guards, result outbox, and inbox `APPLIED` share one local transaction. A lost lease rolls the whole processing transaction back.
-- Settlement keeps an explicit transaction; the rejected autocommit experiment is not current behavior.
+- Trade settlement and inbox `APPLIED` share one transaction; losing the worker lease rolls back the settlement row and both balance updates.
+- Wallet rejects self-trade facts and prices outside either party's limit before mutation. MatchEngine owns primary self-trade prevention; this is a defensive financial boundary.
+- New settlement rows retain the inbox payload hash. An existing settlement is a duplicate only when that immutable identity matches; legacy rows without identity require investigation.
 - Stable UUID lock ordering protects reversed buyer/seller concurrency from deadlocks.
 - Unique keys and idempotency claims absorb RabbitMQ redelivery.
 - Trade settlement and cancellation apply disjoint, idempotent asset deltas, so either delivery order converges to the same balances.
@@ -73,7 +77,7 @@ Wallet trusts MatchEngine's immutable cancellation result for the exact unmatche
 
 Locked currency and energy are fungible user-level pools. Wallet does not assign portions of the pool to individual orders; `order_id` is retained only as an idempotency identity. Order-level unmatched quantity remains a MatchEngine-owned fact, while Wallet enforces aggregate feasibility and non-negative balances.
 
-The durable inbox does not solve a Wallet database outage before the inbox insert. In that window the listener cannot ACK and currently falls back to the short Spring Rabbit retry window and DLQ. Delayed transport retry or consumer pause, Saga age/timeout alerts, and a controlled DLQ recovery plane remain follow-up work. `TradeExecutedEvent` also still uses its dedicated idempotent settlement transaction rather than this shared message inbox.
+The durable inbox does not solve a Wallet database outage before the inbox insert. In that window the listener cannot ACK and currently falls back to the short Spring Rabbit retry window and DLQ. Delayed transport retry or consumer pause, Saga age/timeout alerts, and a controlled DLQ recovery plane remain follow-up work.
 
 ## Run
 

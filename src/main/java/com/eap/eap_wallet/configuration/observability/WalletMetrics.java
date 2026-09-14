@@ -36,6 +36,7 @@ public class WalletMetrics {
     private final Timer outboxMarkSentTimer;
     private final Timer outboxBatchTimer;
     private final Counter tradeSettlementConsumedCounter;
+    private final Counter tradeInboxDuplicateCounter;
     private final Counter tradeSettlementCompletedCounter;
     private final Counter tradeSettlementDuplicateSkippedCounter;
     private final Counter tradeSettlementFailedCounter;
@@ -146,6 +147,9 @@ public class WalletMetrics {
         this.tradeSettlementConsumedCounter = Counter.builder("eap_wallet_trade_settlement_consumed_total")
                 .description("Total TradeExecutedEvent messages consumed by wallet settlement")
                 .register(registry);
+        this.tradeInboxDuplicateCounter = Counter.builder("eap_wallet_trade_inbox_duplicate_total")
+                .description("Total duplicate TradeExecutedEvent deliveries absorbed by the Wallet durable inbox")
+                .register(registry);
         this.tradeSettlementCompletedCounter = Counter.builder("eap_wallet_trade_settlement_completed_total")
                 .description("Total wallet trade settlements completed")
                 .register(registry);
@@ -158,11 +162,11 @@ public class WalletMetrics {
         this.tradeSettlementProcessingTimer = stageTimer(
                 registry,
                 "eap_wallet_trade_settlement_processing_duration",
-                "Time spent processing TradeExecutedEvent in wallet service");
+                "Time spent durably receiving TradeExecutedEvent into the Wallet inbox");
         this.tradeSettlementTransactionTimer = stageTimer(
                 registry,
                 "eap_wallet_trade_settlement_transaction_duration",
-                "Time spent executing and committing wallet trade settlement transaction");
+                "Time spent executing and committing Wallet trade settlement from the durable inbox");
         this.tradeSettlementCteTimer = stageTimer(
                 registry,
                 "eap_wallet_trade_settlement_cte_duration",
@@ -263,6 +267,10 @@ public class WalletMetrics {
 
     public void tradeSettlementConsumed(int count) {
         tradeSettlementConsumedCounter.increment(count);
+    }
+
+    public void tradeInboxDuplicate() {
+        tradeInboxDuplicateCounter.increment();
     }
 
     public void tradeSettlementCompleted() {

@@ -13,6 +13,7 @@ import org.springframework.jdbc.datasource.DriverManagerDataSource;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.LocalDateTime;
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -123,7 +124,7 @@ class WalletTradeSettlementAppenderPostgresIT {
     void missingSellerWallet_shouldNotCommitSettlementOrBuyerUpdate() {
         TradeExecutedEvent event = event("-missing-seller", userIds.get(0), UUID.randomUUID());
 
-        assertThrows(IllegalStateException.class, () -> appendTransactionally(event));
+        assertThrows(WalletAssetConsistencyException.class, () -> appendTransactionally(event));
 
         assertEquals(0, settlementCount(event.getTradeId()));
         assertWallet(userIds.get(0), 100, 0, 10000, 0);
@@ -136,7 +137,7 @@ class WalletTradeSettlementAppenderPostgresIT {
                 userIds.get(1));
         TradeExecutedEvent event = event("-insufficient-seller", userIds.get(0), userIds.get(1));
 
-        assertThrows(IllegalStateException.class, () -> appendTransactionally(event));
+        assertThrows(WalletAssetConsistencyException.class, () -> appendTransactionally(event));
 
         assertEquals(0, settlementCount(event.getTradeId()));
         assertWallet(userIds.get(0), 100, 0, 10000, 0);
@@ -154,7 +155,10 @@ class WalletTradeSettlementAppenderPostgresIT {
 
     private WalletTradeSettlementAppender.SettlementOutcome appendTransactionally(
             TradeExecutedEvent event) {
-        return transactionTemplate.execute(status -> appender.append(event, event.getOccurredAt()));
+        return transactionTemplate.execute(status -> appender.append(
+                event,
+                event.getOccurredAt(),
+                UUID.nameUUIDFromBytes(event.getTradeId().getBytes(StandardCharsets.UTF_8)).toString()));
     }
 
     private long settlementCount(String tradeId) {

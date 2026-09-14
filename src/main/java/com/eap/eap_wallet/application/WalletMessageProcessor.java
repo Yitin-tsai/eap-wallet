@@ -3,6 +3,7 @@ package com.eap.eap_wallet.application;
 import com.eap.common.event.OrderAssetReservationReleasedEvent;
 import com.eap.common.event.OrderCancellationResultEvent;
 import com.eap.common.event.OrderSubmittedEvent;
+import com.eap.common.event.TradeExecutedEvent;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -23,22 +24,66 @@ public class WalletMessageProcessor {
 
     private final WalletOrderReservationProcessor reservationProcessor;
     private final WalletOrderCancellationAppender cancellationAppender;
+    private final WalletTradeSettlementAppender settlementAppender;
     private final WalletMessageInbox inbox;
     private final NamedParameterJdbcTemplate jdbc;
     private final ObjectMapper objectMapper;
 
     @Transactional
-    public void process(WalletMessageInbox.InboxEntry entry, String owner) {
-        switch (entry.messageType()) {
-            case ORDER_SUBMITTED -> reservationProcessor.reserve(
-                    deserialize(entry.payload(), OrderSubmittedEvent.class));
-            case ORDER_CANCELLATION_RESULT -> processCancellation(
-                    deserialize(entry.payload(), OrderCancellationResultEvent.class));
-        }
+    public ProcessingOutcome process(WalletMessageInbox.InboxEntry entry, String owner) {
+        ProcessingOutcome outcome = switch (entry.messageType()) {
+            case ORDER_SUBMITTED -> {
+                reservationProcessor.reserve(deserialize(entry.payload(), OrderSubmittedEvent.class));
+                yield ProcessingOutcome.APPLIED;
+            }
+            case ORDER_CANCELLATION_RESULT -> {
+                processCancellation(deserialize(entry.payload(), OrderCancellationResultEvent.class));
+                yield ProcessingOutcome.APPLIED;
+            }
+            case TRADE_EXECUTED -> processTrade(
+                    deserialize(entry.payload(), TradeExecutedEvent.class), entry.payloadHash());
+        };
         if (!inbox.markApplied(entry, owner)) {
             throw new IllegalStateException(
                     "Lost Wallet inbox lease before APPLIED: type=" + entry.messageType()
                             + ", id=" + entry.messageId());
+        }
+        return outcome;
+    }
+
+    private ProcessingOutcome processTrade(TradeExecutedEvent event, String payloadHash) {
+        validateTrade(event);
+        LocalDateTime settledAt = event.getOccurredAt() == null ? LocalDateTime.now() : event.getOccurredAt();
+        WalletTradeSettlementAppender.SettlementOutcome outcome =
+                settlementAppender.append(event, settledAt, payloadHash);
+        return outcome.duplicate()
+                ? ProcessingOutcome.TRADE_DUPLICATE
+                : ProcessingOutcome.TRADE_SETTLED;
+    }
+
+    private void validateTrade(TradeExecutedEvent event) {
+        if (event.getTradeId() == null || event.getTradeId().isBlank()
+                || event.getBuyerId() == null || event.getSellerId() == null
+                || event.getBuyerOrderId() == null || event.getSellerOrderId() == null) {
+            throw new IllegalArgumentException("TradeExecutedEvent settlement identifiers are required");
+        }
+        if (event.getBuyerId().equals(event.getSellerId())) {
+            throw new IllegalArgumentException("TradeExecutedEvent cannot settle a self-trade");
+        }
+        if (event.getBuyerOrderId().equals(event.getSellerOrderId())) {
+            throw new IllegalArgumentException("TradeExecutedEvent buyer and seller orders must differ");
+        }
+        if (event.getOriginBuyerPrice() == null || event.getOriginBuyerPrice() <= 0
+                || event.getOriginSellerPrice() == null || event.getOriginSellerPrice() <= 0
+                || event.getDealPrice() == null || event.getDealPrice() <= 0
+                || event.getQuantity() == null || event.getQuantity() <= 0) {
+            throw new IllegalArgumentException("TradeExecutedEvent settlement values must be positive");
+        }
+        if (event.getDealPrice() > event.getOriginBuyerPrice()) {
+            throw new IllegalArgumentException("Trade deal price exceeds buyer limit price");
+        }
+        if (event.getDealPrice() < event.getOriginSellerPrice()) {
+            throw new IllegalArgumentException("Trade deal price is below seller limit price");
         }
     }
 
@@ -137,5 +182,11 @@ public class WalletMessageProcessor {
     }
 
     private record Publication(UUID eventId, UUID orderId) {
+    }
+
+    public enum ProcessingOutcome {
+        APPLIED,
+        TRADE_SETTLED,
+        TRADE_DUPLICATE
     }
 }

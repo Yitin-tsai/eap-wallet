@@ -20,13 +20,18 @@ public class WalletTradeSettlementAppender {
 
     public SettlementOutcome append(
             TradeExecutedEvent event,
-            LocalDateTime settledAt) {
-        int dealCurrency = event.getDealPrice() * event.getQuantity();
-        int originalLockedCurrency = event.getOriginBuyerPrice() * event.getQuantity();
-        int refundCurrency = originalLockedCurrency - dealCurrency;
+            LocalDateTime settledAt,
+            String eventPayloadHash) {
+        if (eventPayloadHash == null || eventPayloadHash.isBlank()) {
+            throw new IllegalArgumentException("TradeExecutedEvent payload hash is required");
+        }
+        int dealCurrency = Math.multiplyExact(event.getDealPrice(), event.getQuantity());
+        int originalLockedCurrency = Math.multiplyExact(event.getOriginBuyerPrice(), event.getQuantity());
+        int refundCurrency = Math.subtractExact(originalLockedCurrency, dealCurrency);
 
         int[] insertedSettlements = {0};
         int[] existingSettlements = {0};
+        boolean[] existingPayloadMatches = {false};
         int[] lockedWallets = {0};
         int[] updatedBuyers = {0};
         int[] updatedSellers = {0};
@@ -41,14 +46,14 @@ public class WalletTradeSettlementAppender {
                     FOR UPDATE
                 ),
                 existing_settlement AS MATERIALIZED (
-                    SELECT trade_id
+                    SELECT trade_id, event_payload_hash
                     FROM wallet_service.trade_settlements
                     WHERE trade_id = :tradeId
                 ),
                 settlement AS (
                     INSERT INTO wallet_service.trade_settlements
-                        (trade_id, legacy_match_id, settled_at)
-                    SELECT :tradeId, :legacyMatchId, :settledAt
+                        (trade_id, legacy_match_id, settled_at, event_payload_hash)
+                    SELECT :tradeId, :legacyMatchId, :settledAt, :eventPayloadHash
                     WHERE (SELECT COUNT(*) FROM locked_wallets) = 2
                       AND NOT EXISTS (SELECT 1 FROM existing_settlement)
                     ON CONFLICT (trade_id) DO NOTHING
@@ -84,6 +89,8 @@ public class WalletTradeSettlementAppender {
                 SELECT
                     (SELECT COUNT(*) FROM locked_wallets) AS locked_wallets,
                     (SELECT COUNT(*) FROM existing_settlement) AS existing_settlements,
+                    COALESCE((SELECT bool_and(event_payload_hash = :eventPayloadHash)
+                              FROM existing_settlement), FALSE) AS existing_payload_matches,
                     (SELECT COUNT(*) FROM settlement) AS inserted_settlements,
                     (SELECT COUNT(*) FROM buyer_update) AS updated_buyers,
                     (SELECT COUNT(*) FROM seller_update) AS updated_sellers
@@ -91,6 +98,7 @@ public class WalletTradeSettlementAppender {
                 .addValue("tradeId", event.getTradeId())
                 .addValue("legacyMatchId", event.getLegacyMatchId())
                 .addValue("settledAt", settledAt)
+                .addValue("eventPayloadHash", eventPayloadHash)
                 .addValue("buyerId", event.getBuyerId())
                 .addValue("sellerId", event.getSellerId())
                 .addValue("originalLockedCurrency", originalLockedCurrency)
@@ -99,6 +107,7 @@ public class WalletTradeSettlementAppender {
                 .addValue("quantity", event.getQuantity()), rs -> {
                     lockedWallets[0] = rs.getInt("locked_wallets");
                     existingSettlements[0] = rs.getInt("existing_settlements");
+                    existingPayloadMatches[0] = rs.getBoolean("existing_payload_matches");
                     insertedSettlements[0] = rs.getInt("inserted_settlements");
                     updatedBuyers[0] = rs.getInt("updated_buyers");
                     updatedSellers[0] = rs.getInt("updated_sellers");
@@ -117,11 +126,15 @@ public class WalletTradeSettlementAppender {
                 refundCurrency,
                 dealCurrency,
                 settledAt);
+        if (existingSettlements[0] == 1 && !existingPayloadMatches[0]) {
+            throw new WalletMessageIdentityConflictException(
+                    "Wallet trade settlement identity cannot be verified: tradeId=" + event.getTradeId());
+        }
         if (outcome.duplicate()) {
             return outcome;
         }
         if (!outcome.completed()) {
-            throw new IllegalStateException("Wallet trade settlement did not persist settlement and update both wallets: tradeId="
+            throw new WalletAssetConsistencyException("Wallet trade settlement did not persist settlement and update both wallets: tradeId="
                     + event.getTradeId()
                     + ", lockedWallets=" + outcome.lockedWallets()
                     + ", existingSettlements=" + outcome.existingSettlements()

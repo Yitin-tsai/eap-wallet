@@ -85,6 +85,10 @@ eap:
       max-attempts: 20
       initial-backoff-ms: 250
       max-backoff-ms: 30000
+    inbox-admin:
+      enabled: false
+    inbox-metrics:
+      refresh-interval-ms: 5000
     outbox-admin:
       enabled: false
     outbox-relay:

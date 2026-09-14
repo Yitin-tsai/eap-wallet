@@ -1,5 +1,6 @@
 package com.eap.eap_wallet.application;
 
+import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -16,6 +17,7 @@ public class WalletMessageReconciler {
     private final WalletMessageInbox inbox;
     private final WalletMessageProcessor processor;
     private final WalletMessageErrorClassifier classifier;
+    private final WalletMetrics walletMetrics;
     private final String owner = UUID.randomUUID().toString();
     private final int batchSize;
     private final long leaseMs;
@@ -27,6 +29,7 @@ public class WalletMessageReconciler {
             WalletMessageInbox inbox,
             WalletMessageProcessor processor,
             WalletMessageErrorClassifier classifier,
+            WalletMetrics walletMetrics,
             @Value("${eap.wallet.inbox-reconciler.batch-size:100}") int batchSize,
             @Value("${eap.wallet.inbox-reconciler.lease-ms:30000}") long leaseMs,
             @Value("${eap.wallet.inbox-reconciler.max-attempts:20}") int maxAttempts,
@@ -35,6 +38,7 @@ public class WalletMessageReconciler {
         this.inbox = inbox;
         this.processor = processor;
         this.classifier = classifier;
+        this.walletMetrics = walletMetrics;
         this.batchSize = Math.max(1, batchSize);
         this.leaseMs = Math.max(1, leaseMs);
         this.maxAttempts = Math.max(1, maxAttempts);
@@ -53,22 +57,46 @@ public class WalletMessageReconciler {
     }
 
     private void process(WalletMessageInbox.InboxEntry entry) {
+        long startedAt = System.nanoTime();
         try {
-            processor.process(entry, owner);
+            WalletMessageProcessor.ProcessingOutcome outcome = processor.process(entry, owner);
+            if (outcome == WalletMessageProcessor.ProcessingOutcome.TRADE_SETTLED) {
+                walletMetrics.tradeSettlementCompleted();
+            } else if (outcome == WalletMessageProcessor.ProcessingOutcome.TRADE_DUPLICATE) {
+                walletMetrics.tradeSettlementDuplicateSkipped();
+            }
         } catch (Exception failure) {
+            if (entry.messageType() == WalletMessageInbox.MessageType.TRADE_EXECUTED) {
+                walletMetrics.tradeSettlementFailed();
+            }
             WalletMessageErrorClassifier.Classification classification = classifier.classify(failure);
             if (!classification.retryable() || entry.attemptCount() >= maxAttempts) {
-                inbox.markPermanent(entry, owner, classification.errorType(), failure);
-                log.error("Wallet inbox message permanently failed: type={}, id={}, attempts={}",
-                        entry.messageType(), entry.messageId(), entry.attemptCount(), failure);
+                boolean marked = inbox.markPermanent(entry, owner, classification.errorType(), failure);
+                if (marked) {
+                    log.error("Wallet inbox message permanently failed: type={}, id={}, attempts={}",
+                            entry.messageType(), entry.messageId(), entry.attemptCount(), failure);
+                } else {
+                    log.warn("Wallet inbox lease changed before permanent failure update: type={}, id={}",
+                            entry.messageType(), entry.messageId());
+                }
                 return;
             }
             long delayMs = retryDelayWithJitter(entry.attemptCount());
-            inbox.reschedule(entry, owner, "FAILED_RETRYABLE",
+            boolean rescheduled = inbox.reschedule(entry, owner, "FAILED_RETRYABLE",
                     classification.errorType(), failure, delayMs);
-            log.warn("Wallet inbox retry scheduled: type={}, id={}, attempt={}, delayMs={}, errorType={}",
-                    entry.messageType(), entry.messageId(), entry.attemptCount(), delayMs,
-                    classification.errorType());
+            if (rescheduled) {
+                log.warn("Wallet inbox retry scheduled: type={}, id={}, attempt={}, delayMs={}, errorType={}",
+                        entry.messageType(), entry.messageId(), entry.attemptCount(), delayMs,
+                        classification.errorType());
+            } else {
+                log.warn("Wallet inbox lease changed before retry update: type={}, id={}",
+                        entry.messageType(), entry.messageId());
+            }
+        } finally {
+            if (entry.messageType() == WalletMessageInbox.MessageType.TRADE_EXECUTED) {
+                walletMetrics.recordTradeSettlementTransaction(
+                        java.time.Duration.ofNanos(System.nanoTime() - startedAt));
+            }
         }
     }
 

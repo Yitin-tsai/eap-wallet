@@ -2,6 +2,7 @@ package com.eap.eap_wallet.application;
 
 import com.eap.common.event.OrderCancellationResultEvent;
 import com.eap.common.event.OrderSubmittedEvent;
+import com.eap.common.event.TradeExecutedEvent;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
@@ -15,7 +16,8 @@ import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
+
+import static com.eap.common.event.TradeExecutedEvent.MAX_TRADE_ID_LENGTH;
 
 @Component
 @RequiredArgsConstructor
@@ -30,7 +32,7 @@ public class WalletMessageInbox {
         if (event == null || event.getOrderId() == null || event.getUserId() == null) {
             throw new IllegalArgumentException("OrderSubmittedEvent orderId and userId are required");
         }
-        return receive(MessageType.ORDER_SUBMITTED, event.getOrderId(), event);
+        return receive(MessageType.ORDER_SUBMITTED, event.getOrderId().toString(), event);
     }
 
     public ReceiveOutcome receiveCancellationResult(OrderCancellationResultEvent event) {
@@ -39,10 +41,21 @@ public class WalletMessageInbox {
                 || event.getOutcome() == null) {
             throw new IllegalArgumentException("Cancellation result identifiers and outcome are required");
         }
-        return receive(MessageType.ORDER_CANCELLATION_RESULT, event.getCancellationId(), event);
+        return receive(MessageType.ORDER_CANCELLATION_RESULT, event.getCancellationId().toString(), event);
     }
 
-    private ReceiveOutcome receive(MessageType type, UUID messageId, Object event) {
+    public ReceiveOutcome receiveTradeExecuted(TradeExecutedEvent event) {
+        if (event == null || event.getTradeId() == null || event.getTradeId().isBlank()) {
+            throw new IllegalArgumentException("TradeExecutedEvent tradeId is required");
+        }
+        if (event.getTradeId().length() > MAX_TRADE_ID_LENGTH) {
+            throw new IllegalArgumentException(
+                    "TradeExecutedEvent tradeId exceeds " + MAX_TRADE_ID_LENGTH + " characters");
+        }
+        return receive(MessageType.TRADE_EXECUTED, event.getTradeId(), event);
+    }
+
+    private ReceiveOutcome receive(MessageType type, String messageId, Object event) {
         String payload = serialize(event);
         String hash = sha256(payload);
         int inserted = jdbc.update("""
@@ -107,15 +120,17 @@ public class WalletMessageInbox {
                 FROM candidates
                 WHERE inbox.message_type = candidates.message_type
                   AND inbox.message_id = candidates.message_id
-                RETURNING inbox.message_type, inbox.message_id, inbox.payload, inbox.attempt_count
+                RETURNING inbox.message_type, inbox.message_id, inbox.payload,
+                          inbox.payload_hash, inbox.attempt_count
                 """, new MapSqlParameterSource()
                 .addValue("limit", limit)
                 .addValue("owner", owner)
                 .addValue("leaseMs", leaseMs),
                 (rs, rowNum) -> new InboxEntry(
                         MessageType.valueOf(rs.getString("message_type")),
-                        rs.getObject("message_id", UUID.class),
+                        rs.getString("message_id"),
                         rs.getString("payload"),
+                        rs.getString("payload_hash"),
                         rs.getInt("attempt_count")));
     }
 
@@ -186,7 +201,27 @@ public class WalletMessageInbox {
                 });
     }
 
-    private MapSqlParameterSource params(MessageType type, UUID id) {
+    public long countIdentityConflicts() {
+        Long count = jdbc.getJdbcTemplate().queryForObject("""
+                SELECT COUNT(*)
+                FROM wallet_service.message_inbox
+                WHERE conflict_detected_at IS NOT NULL
+                """, Long.class);
+        return count == null ? 0L : count;
+    }
+
+    public long oldestUnresolvedAgeSeconds() {
+        Long age = jdbc.getJdbcTemplate().queryForObject("""
+                SELECT COALESCE(
+                    EXTRACT(EPOCH FROM (CURRENT_TIMESTAMP - MIN(received_at)))::BIGINT,
+                    0)
+                FROM wallet_service.message_inbox
+                WHERE status <> 'APPLIED'
+                """, Long.class);
+        return age == null ? 0L : Math.max(age, 0L);
+    }
+
+    private MapSqlParameterSource params(MessageType type, String id) {
         return new MapSqlParameterSource()
                 .addValue("messageType", type.name())
                 .addValue("messageId", id);
@@ -221,7 +256,8 @@ public class WalletMessageInbox {
 
     public enum MessageType {
         ORDER_SUBMITTED,
-        ORDER_CANCELLATION_RESULT
+        ORDER_CANCELLATION_RESULT,
+        TRADE_EXECUTED
     }
 
     public enum ReceiveOutcome {
@@ -232,8 +268,9 @@ public class WalletMessageInbox {
 
     public record InboxEntry(
             MessageType messageType,
-            UUID messageId,
+            String messageId,
             String payload,
+            String payloadHash,
             int attemptCount) {
     }
 }

@@ -1,5 +1,6 @@
 package com.eap.eap_wallet.application;
 
+import com.eap.eap_wallet.configuration.observability.WalletMetrics;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -22,12 +23,13 @@ class WalletMessageReconcilerTest {
     @Mock WalletMessageInbox inbox;
     @Mock WalletMessageProcessor processor;
     @Mock WalletMessageErrorClassifier classifier;
+    @Mock WalletMetrics walletMetrics;
 
     private WalletMessageReconciler reconciler;
 
     @BeforeEach
     void setUp() {
-        reconciler = new WalletMessageReconciler(inbox, processor, classifier,
+        reconciler = new WalletMessageReconciler(inbox, processor, classifier, walletMetrics,
                 10, 30_000, 5, 250, 30_000);
     }
 
@@ -76,11 +78,47 @@ class WalletMessageReconcilerTest {
         verify(inbox).markPermanent(eq(entry), anyString(), eq("UNKNOWN_RETRYABLE"), eq(failure));
     }
 
+    @Test
+    void completedTrade_shouldRecordSettlementAfterProcessorTransactionReturns() {
+        WalletMessageInbox.InboxEntry entry = entry(WalletMessageInbox.MessageType.TRADE_EXECUTED, 1);
+        when(inbox.claimRetryable(eq(10), anyString(), eq(30_000L))).thenReturn(List.of(entry));
+        when(processor.process(eq(entry), anyString()))
+                .thenReturn(WalletMessageProcessor.ProcessingOutcome.TRADE_SETTLED);
+
+        reconciler.reconcile();
+
+        verify(walletMetrics).tradeSettlementCompleted();
+        verify(walletMetrics).recordTradeSettlementTransaction(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void transientTradeFailure_shouldRemainDurableAndRecordFailure() {
+        WalletMessageInbox.InboxEntry entry = entry(WalletMessageInbox.MessageType.TRADE_EXECUTED, 1);
+        RuntimeException failure = new RuntimeException("database unavailable");
+        when(inbox.claimRetryable(eq(10), anyString(), eq(30_000L))).thenReturn(List.of(entry));
+        doThrow(failure).when(processor).process(eq(entry), anyString());
+        when(classifier.classify(failure)).thenReturn(
+                new WalletMessageErrorClassifier.Classification(true, "TRANSIENT_DATABASE"));
+
+        reconciler.reconcile();
+
+        verify(walletMetrics).tradeSettlementFailed();
+        verify(inbox).reschedule(eq(entry), anyString(), eq("FAILED_RETRYABLE"),
+                eq("TRANSIENT_DATABASE"), eq(failure), anyLong());
+    }
+
     private WalletMessageInbox.InboxEntry entry(int attempt) {
+        return entry(WalletMessageInbox.MessageType.ORDER_SUBMITTED, attempt);
+    }
+
+    private WalletMessageInbox.InboxEntry entry(
+            WalletMessageInbox.MessageType messageType,
+            int attempt) {
         return new WalletMessageInbox.InboxEntry(
-                WalletMessageInbox.MessageType.ORDER_SUBMITTED,
-                UUID.randomUUID(),
+                messageType,
+                UUID.randomUUID().toString(),
                 "{}",
+                "payload-hash",
                 attempt);
     }
 }

@@ -47,7 +47,8 @@ class WalletMessageProcessorPostgresIT {
         jdbc.update("DELETE FROM wallet_service.outbox WHERE payload LIKE ?", "%" + orderId + "%");
         jdbc.update("DELETE FROM wallet_service.order_asset_release_publications WHERE order_id = ?", orderId);
         jdbc.update("DELETE FROM wallet_service.order_cancellation_applications WHERE order_id = ?", orderId);
-        jdbc.update("DELETE FROM wallet_service.message_inbox WHERE message_id IN (?, ?)", orderId, cancellationId);
+        jdbc.update("DELETE FROM wallet_service.message_inbox WHERE message_id IN (?, ?)",
+                orderId.toString(), cancellationId.toString());
         jdbc.update("DELETE FROM wallet_service.order_submission_idempotency WHERE order_id = ?", orderId);
         jdbc.update("DELETE FROM wallet_service.wallets WHERE user_id = ?", userId);
     }
@@ -143,7 +144,8 @@ class WalletMessageProcessorPostgresIT {
 
     private WalletMessageInbox.InboxEntry claim(String owner, UUID messageId) {
         List<WalletMessageInbox.InboxEntry> entries = inbox.claimRetryable(20, owner, 30_000);
-        return entries.stream().filter(entry -> entry.messageId().equals(messageId)).findFirst().orElseThrow();
+        return entries.stream().filter(entry -> entry.messageId().equals(messageId.toString()))
+                .findFirst().orElseThrow();
     }
 
     private int value(String column) {
@@ -153,12 +155,12 @@ class WalletMessageProcessorPostgresIT {
 
     private String inboxStatus(UUID messageId) {
         return jdbc.queryForObject("SELECT status FROM wallet_service.message_inbox WHERE message_id = ?",
-                String.class, messageId);
+                String.class, messageId.toString());
     }
 
     private String inboxErrorType(UUID messageId) {
         return jdbc.queryForObject("SELECT error_type FROM wallet_service.message_inbox WHERE message_id = ?",
-                String.class, messageId);
+                String.class, messageId.toString());
     }
 
     private int outboxCount(String type) {

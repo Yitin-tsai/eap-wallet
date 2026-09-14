@@ -409,4 +409,24 @@
         </sql>
     </changeSet>
 
+    <changeSet id="wallet-025" author="eap">
+        <comment>Persist TradeExecuted messages in the Wallet durable inbox before broker acknowledgement</comment>
+        <sql>
+            ALTER TABLE wallet_service.message_inbox
+                ALTER COLUMN message_id TYPE VARCHAR(80)
+                USING message_id::text;
+
+            ALTER TABLE wallet_service.message_inbox
+                DROP CONSTRAINT ck_wallet_message_inbox_type;
+            ALTER TABLE wallet_service.message_inbox
+                ADD CONSTRAINT ck_wallet_message_inbox_type
+                CHECK (message_type IN ('ORDER_SUBMITTED',
+                                        'ORDER_CANCELLATION_RESULT',
+                                        'TRADE_EXECUTED'));
+
+            ALTER TABLE wallet_service.trade_settlements
+                ADD COLUMN event_payload_hash VARCHAR(64);
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>
