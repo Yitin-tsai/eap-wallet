@@ -1,14 +1,11 @@
 package com.eap.eap_wallet.configuration.observability;
 
-import com.eap.eap_wallet.configuration.repository.OutboxRepository;
 import io.micrometer.core.instrument.Counter;
-import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
 import io.micrometer.core.instrument.Timer;
 import org.springframework.stereotype.Component;
 
 import java.time.Duration;
-import java.time.LocalDateTime;
 
 @Component
 public class WalletMetrics {
@@ -45,7 +42,7 @@ public class WalletMetrics {
     private final Timer tradeSettlementCteTimer;
     private final MeterRegistry registry;
 
-    public WalletMetrics(MeterRegistry registry, OutboxRepository outboxRepository) {
+    public WalletMetrics(MeterRegistry registry) {
         this.registry = registry;
         this.orderSubmittedConsumedCounter = Counter.builder("eap_wallet_order_submitted_consumed_total")
                 .description("Total OrderSubmittedEvent messages consumed by wallet service")
@@ -92,21 +89,6 @@ public class WalletMetrics {
                 registry,
                 "eap_wallet_order_submitted_reservation_cte_duration",
                 "Time spent executing the Wallet OrderSubmitted reservation CTE");
-
-        Gauge.builder("eap_wallet_outbox_pending", outboxRepository, repo -> repo.countByStatus("PENDING"))
-                .description("Current number of pending wallet outbox records")
-                .register(registry);
-
-        Gauge.builder("eap_wallet_outbox_oldest_pending_age_seconds", outboxRepository, repo ->
-                        repo.findFirstByStatusOrderByCreatedAtAsc("PENDING")
-                                .map(entry -> Math.max(0L, Duration.between(entry.getCreatedAt(), LocalDateTime.now()).toSeconds()))
-                                .orElse(0L))
-                .description("Age in seconds of the oldest pending wallet outbox record")
-                .register(registry);
-
-        Gauge.builder("eap_wallet_outbox_failed", outboxRepository, repo -> repo.countByStatus("FAILED"))
-                .description("Current number of permanently failed wallet outbox records")
-                .register(registry);
 
         this.outboxPublishedCounter = Counter.builder("eap_wallet_outbox_published_total")
                 .description("Total wallet outbox records confirmed by RabbitMQ")

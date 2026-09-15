@@ -23,6 +23,7 @@ import java.util.ArrayList;
 import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -99,6 +100,8 @@ class OutboxPollerTest {
         OutboxPoller.OutboxRow entry = pendingEntry(1L);
         stubPending(List.of(entry));
         doAnswer(invocation -> {
+            Message message = invocation.getArgument(2);
+            assertNotNull(message.getMessageProperties().getTimestamp());
             CorrelationData correlationData = invocation.getArgument(3);
             correlationData.getFuture().complete(new CorrelationData.Confirm(true, null));
             return null;

@@ -429,4 +429,16 @@
         </sql>
     </changeSet>
 
+    <changeSet id="wallet-026" author="eap">
+        <comment>Bound durable-debt snapshot queries to unresolved Wallet work</comment>
+        <sql>
+            CREATE INDEX idx_wallet_message_inbox_debt_age
+                ON wallet_service.message_inbox(message_type, received_at)
+                WHERE status &lt;&gt; 'APPLIED' OR conflict_detected_at IS NOT NULL;
+            CREATE INDEX idx_wallet_outbox_debt_age
+                ON wallet_service.outbox(created_at)
+                WHERE status &lt;&gt; 'SENT';
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>
