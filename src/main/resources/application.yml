@@ -8,6 +8,8 @@ spring:
     url: jdbc:postgresql://localhost:5432/eapdb
     username: admin
     password: admin123
+    hikari:
+      connection-timeout: ${EAP_DB_CONNECTION_TIMEOUT_MS:2000}
   liquibase:
     enabled: true                               
     change-log: classpath:db/changelog/db.changelog-master.xml

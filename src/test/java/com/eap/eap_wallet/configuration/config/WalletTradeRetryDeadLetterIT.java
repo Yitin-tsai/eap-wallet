@@ -1,5 +1,7 @@
 package com.eap.eap_wallet.configuration.config;
 
+import com.eap.eap_wallet.configuration.reliability.WalletCdaDatabaseOutageCircuitBreaker;
+import com.eap.eap_wallet.configuration.reliability.WalletCdaDatabaseOutageMessageRecoverer;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledIfSystemProperty;
 import org.springframework.amqp.core.BindingBuilder;
@@ -13,7 +15,6 @@ import org.springframework.amqp.rabbit.connection.CachingConnectionFactory;
 import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.amqp.rabbit.listener.SimpleMessageListenerContainer;
-import org.springframework.amqp.rabbit.retry.RejectAndDontRequeueRecoverer;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
@@ -22,6 +23,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
 
 @EnabledIfSystemProperty(named = "eap.integration.rabbit", matches = "true")
 class WalletTradeRetryDeadLetterIT {
@@ -52,13 +57,15 @@ class WalletTradeRetryDeadLetterIT {
         rabbitAdmin.declareQueue(source);
 
         AtomicInteger attempts = new AtomicInteger();
+        WalletCdaDatabaseOutageCircuitBreaker circuitBreaker = mock(WalletCdaDatabaseOutageCircuitBreaker.class);
+        when(circuitBreaker.ownsQueue(sourceQueue)).thenReturn(true);
         SimpleMessageListenerContainer listener = new SimpleMessageListenerContainer(connectionFactory);
         listener.setQueueNames(sourceQueue);
         listener.setDefaultRequeueRejected(false);
         listener.setAdviceChain(RetryInterceptorBuilder.stateless()
                 .maxAttempts(2)
                 .backOffOptions(1, 1, 1)
-                .recoverer(new RejectAndDontRequeueRecoverer())
+                .recoverer(new WalletCdaDatabaseOutageMessageRecoverer(circuitBreaker))
                 .build());
         listener.setMessageListener((MessageListener) message -> {
             attempts.incrementAndGet();
@@ -75,6 +82,7 @@ class WalletTradeRetryDeadLetterIT {
             assertNotNull(deadLetter);
             assertEquals("trade-1", new String(deadLetter.getBody(), StandardCharsets.UTF_8));
             assertEquals(2, attempts.get());
+            verify(circuitBreaker, never()).open(org.mockito.ArgumentMatchers.any());
         } finally {
             listener.stop();
             rabbitAdmin.deleteQueue(sourceQueue);

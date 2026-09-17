@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 
 import static com.eap.common.constants.RabbitMQConstants.WALLET_ORDER_SUBMITTED_QUEUE;
+import static com.eap.eap_wallet.configuration.reliability.WalletCdaDatabaseOutageCircuitBreaker.ORDER_SUBMITTED_LISTENER_ID;
 
 @Component
 @RequiredArgsConstructor
@@ -24,6 +25,7 @@ public class CreateOrderListener {
      * message is stored or verified as an identical duplicate.
      */
     @RabbitListener(
+            id = ORDER_SUBMITTED_LISTENER_ID,
             queues = WALLET_ORDER_SUBMITTED_QUEUE,
             concurrency = "${eap.wallet.listeners.order-submitted.concurrency:8}")
     public void onOrderSubmitted(OrderSubmittedEvent event) {

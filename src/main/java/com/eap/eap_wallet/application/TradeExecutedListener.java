@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 import java.time.Duration;
 
 import static com.eap.common.constants.RabbitMQConstants.WALLET_TRADE_EXECUTED_QUEUE;
+import static com.eap.eap_wallet.configuration.reliability.WalletCdaDatabaseOutageCircuitBreaker.TRADE_EXECUTED_LISTENER_ID;
 
 @Component
 @RequiredArgsConstructor
@@ -20,6 +21,7 @@ public class TradeExecutedListener {
     private final WalletMetrics walletMetrics;
 
     @RabbitListener(
+            id = TRADE_EXECUTED_LISTENER_ID,
             queues = WALLET_TRADE_EXECUTED_QUEUE,
             concurrency = "${eap.wallet.listeners.trade-executed.concurrency:4}")
     public void handleTradeExecuted(TradeExecutedEvent event) {
