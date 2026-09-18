@@ -81,4 +81,36 @@ class WalletRecoveryCaseServicePostgresIT {
                 WHERE message_type = 'TRADE_EXECUTED' AND message_id = ?
                 """, String.class, messageId)).isEqualTo("FAILED_PERMANENT");
     }
+
+    @Test
+    void transientTerminalWorkShouldReplayOnceAndReturnStoredResultAfterResponseLoss() {
+        messageId = UUID.randomUUID().toString();
+        jdbc.update("""
+                INSERT INTO wallet_service.message_inbox
+                    (message_type, message_id, payload, payload_hash, status,
+                     attempt_count, error_type, last_error)
+                VALUES ('TRADE_EXECUTED', ?, '{}', 'hash', 'FAILED_PERMANENT',
+                        20, 'RETRY_EXHAUSTED_TRANSIENT_DATA_STORE', 'database unavailable')
+                """, messageId);
+        var terminal = service.list(10).stream()
+                .filter(item -> item.sourceId().equals(messageId))
+                .findFirst().orElseThrow();
+        UUID actionId = UUID.randomUUID();
+        RecoveryExecuteRequest request = new RecoveryExecuteRequest(
+                actionId, RecoveryActionType.REPLAY, terminal.fingerprint());
+
+        var first = service.execute(terminal.caseId(), request);
+        var repeatedAfterLostResponse = service.execute(terminal.caseId(), request);
+
+        assertThat(first.status()).isEqualTo(RecoveryExecutionStatus.APPLIED);
+        assertThat(repeatedAfterLostResponse).isEqualTo(first);
+        assertThat(jdbc.queryForObject("""
+                SELECT status FROM wallet_service.message_inbox
+                WHERE message_type = 'TRADE_EXECUTED' AND message_id = ?
+                """, String.class, messageId)).isEqualTo("FAILED_RETRYABLE");
+        assertThat(jdbc.queryForObject("""
+                SELECT count(*) FROM wallet_service.recovery_source_actions
+                WHERE action_id = ?
+                """, Integer.class, actionId)).isEqualTo(1);
+    }
 }

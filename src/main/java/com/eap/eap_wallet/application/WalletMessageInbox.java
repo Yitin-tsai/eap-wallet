@@ -9,6 +9,7 @@ import lombok.RequiredArgsConstructor;
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource;
 import org.springframework.jdbc.core.namedparam.NamedParameterJdbcTemplate;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -45,14 +46,29 @@ public class WalletMessageInbox {
     }
 
     public ReceiveOutcome receiveTradeExecuted(TradeExecutedEvent event) {
-        if (event == null || event.getTradeId() == null || event.getTradeId().isBlank()) {
-            throw new IllegalArgumentException("TradeExecutedEvent tradeId is required");
-        }
-        if (event.getTradeId().length() > MAX_TRADE_ID_LENGTH) {
-            throw new IllegalArgumentException(
-                    "TradeExecutedEvent tradeId exceeds " + MAX_TRADE_ID_LENGTH + " characters");
-        }
+        requireTradeIdentity(event);
         return receive(MessageType.TRADE_EXECUTED, event.getTradeId(), event);
+    }
+
+    @Transactional(readOnly = true)
+    public TradeInboxSnapshot inspectTradeExecuted(TradeExecutedEvent event) {
+        requireTradeIdentity(event);
+        String payloadHash = sha256(serialize(event));
+        List<TradeInboxSnapshot> rows = jdbc.query("""
+                SELECT status, payload_hash, error_type,
+                       conflict_detected_at IS NOT NULL AS has_conflict
+                FROM wallet_service.message_inbox
+                WHERE message_type = 'TRADE_EXECUTED' AND message_id = :messageId
+                """, Map.of("messageId", event.getTradeId()),
+                (rs, rowNum) -> new TradeInboxSnapshot(
+                        true,
+                        rs.getString("status"),
+                        payloadHash.equals(rs.getString("payload_hash")),
+                        rs.getString("error_type"),
+                        rs.getBoolean("has_conflict")));
+        return rows.isEmpty()
+                ? new TradeInboxSnapshot(false, null, true, null, false)
+                : rows.get(0);
     }
 
     private ReceiveOutcome receive(MessageType type, String messageId, Object event) {
@@ -97,6 +113,16 @@ public class WalletMessageInbox {
                 .addValue("payload", payload)
                 .addValue("lastError", "Wallet inbox identity conflict: type=" + type + ", id=" + messageId));
         return ReceiveOutcome.CONFLICT;
+    }
+
+    private void requireTradeIdentity(TradeExecutedEvent event) {
+        if (event == null || event.getTradeId() == null || event.getTradeId().isBlank()) {
+            throw new IllegalArgumentException("TradeExecutedEvent tradeId is required");
+        }
+        if (event.getTradeId().length() > MAX_TRADE_ID_LENGTH) {
+            throw new IllegalArgumentException(
+                    "TradeExecutedEvent tradeId exceeds " + MAX_TRADE_ID_LENGTH + " characters");
+        }
     }
 
     public List<InboxEntry> claimRetryable(int limit, String owner, long leaseMs) {
@@ -272,5 +298,13 @@ public class WalletMessageInbox {
             String payload,
             String payloadHash,
             int attemptCount) {
+    }
+
+    public record TradeInboxSnapshot(
+            boolean exists,
+            String status,
+            boolean payloadMatches,
+            String errorType,
+            boolean conflictDetected) {
     }
 }

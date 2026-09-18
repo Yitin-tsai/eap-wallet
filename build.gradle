@@ -83,12 +83,18 @@ tasks.register('walletPostgresIntegrationTest', Test) {
     systemProperty 'eap.integration.postgres.user', System.getProperty('eap.integration.postgres.user', 'admin')
     systemProperty 'eap.integration.postgres.password', System.getProperty(
             'eap.integration.postgres.password', System.getenv('EAP_POSTGRES_IT_PASSWORD') ?: 'admin123')
+    // PostgreSQL-only tests must not publish their temporary outbox rows to a developer RabbitMQ.
+    systemProperty 'spring.rabbitmq.listener.simple.auto-startup', 'false'
+    systemProperty 'eap.wallet.outbox-relay.enabled', 'false'
+    // Docker Engine 29 rejects the legacy API version used during docker-java discovery.
+    systemProperty 'api.version', System.getProperty('api.version', '1.40')
     include '**/WalletTradeSettlementAppenderPostgresIT.class'
     include '**/WalletCancellationSettlementOrderingPostgresIT.class'
     include '**/CreateOrderListenerConcurrencyIT.class'
     include '**/WalletMessageInboxPostgresIT.class'
     include '**/WalletMessageProcessorPostgresIT.class'
     include '**/WalletTradeExecutedInboxPostgresIT.class'
+    include '**/WalletRecoveryCaseServicePostgresIT.class'
     shouldRunAfter tasks.named('test')
 }
 

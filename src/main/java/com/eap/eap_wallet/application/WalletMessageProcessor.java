@@ -52,39 +52,13 @@ public class WalletMessageProcessor {
     }
 
     private ProcessingOutcome processTrade(TradeExecutedEvent event, String payloadHash) {
-        validateTrade(event);
+        WalletTradeEventValidator.validate(event);
         LocalDateTime settledAt = event.getOccurredAt() == null ? LocalDateTime.now() : event.getOccurredAt();
         WalletTradeSettlementAppender.SettlementOutcome outcome =
                 settlementAppender.append(event, settledAt, payloadHash);
         return outcome.duplicate()
                 ? ProcessingOutcome.TRADE_DUPLICATE
                 : ProcessingOutcome.TRADE_SETTLED;
-    }
-
-    private void validateTrade(TradeExecutedEvent event) {
-        if (event.getTradeId() == null || event.getTradeId().isBlank()
-                || event.getBuyerId() == null || event.getSellerId() == null
-                || event.getBuyerOrderId() == null || event.getSellerOrderId() == null) {
-            throw new IllegalArgumentException("TradeExecutedEvent settlement identifiers are required");
-        }
-        if (event.getBuyerId().equals(event.getSellerId())) {
-            throw new IllegalArgumentException("TradeExecutedEvent cannot settle a self-trade");
-        }
-        if (event.getBuyerOrderId().equals(event.getSellerOrderId())) {
-            throw new IllegalArgumentException("TradeExecutedEvent buyer and seller orders must differ");
-        }
-        if (event.getOriginBuyerPrice() == null || event.getOriginBuyerPrice() <= 0
-                || event.getOriginSellerPrice() == null || event.getOriginSellerPrice() <= 0
-                || event.getDealPrice() == null || event.getDealPrice() <= 0
-                || event.getQuantity() == null || event.getQuantity() <= 0) {
-            throw new IllegalArgumentException("TradeExecutedEvent settlement values must be positive");
-        }
-        if (event.getDealPrice() > event.getOriginBuyerPrice()) {
-            throw new IllegalArgumentException("Trade deal price exceeds buyer limit price");
-        }
-        if (event.getDealPrice() < event.getOriginSellerPrice()) {
-            throw new IllegalArgumentException("Trade deal price is below seller limit price");
-        }
     }
 
     private void processCancellation(OrderCancellationResultEvent event) {

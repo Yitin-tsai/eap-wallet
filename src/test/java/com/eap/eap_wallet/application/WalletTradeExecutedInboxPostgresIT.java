@@ -1,6 +1,10 @@
 package com.eap.eap_wallet.application;
 
 import com.eap.common.event.TradeExecutedEvent;
+import com.eap.common.recovery.BrokerReplayPreflightDecision;
+import com.eap.common.recovery.BrokerReplayPreflightRequest;
+import com.eap.eap_wallet.configuration.recovery.WalletBrokerReplayPreflightService;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -38,6 +42,8 @@ class WalletTradeExecutedInboxPostgresIT {
     @Autowired WalletMessageInbox inbox;
     @Autowired WalletMessageProcessor processor;
     @Autowired WalletMessageReconciler reconciler;
+    @Autowired WalletBrokerReplayPreflightService brokerReplayPreflight;
+    @Autowired ObjectMapper objectMapper;
     @Autowired JdbcTemplate jdbc;
 
     private final UUID buyerId = UUID.randomUUID();
@@ -210,6 +216,30 @@ class WalletTradeExecutedInboxPostgresIT {
         assertWallet(sellerId, 0, 5, 0, 0);
     }
 
+    @Test
+    void brokerReplayPreflightShouldFollowDurableInboxOwnershipTransitions() throws Exception {
+        TradeExecutedEvent event = event(5);
+
+        assertEquals(BrokerReplayPreflightDecision.ELIGIBLE,
+                brokerReplayPreflight.inspect(preflightRequest(event)).decision());
+
+        inbox.receiveTradeExecuted(event);
+        assertEquals(BrokerReplayPreflightDecision.ALREADY_DURABLE,
+                brokerReplayPreflight.inspect(preflightRequest(event)).decision());
+
+        processor.process(claim("trade-worker"), "trade-worker");
+        assertEquals(BrokerReplayPreflightDecision.ALREADY_APPLIED,
+                brokerReplayPreflight.inspect(preflightRequest(event)).decision());
+    }
+
+    @Test
+    void brokerReplayPreflightShouldRejectExistingIdentityWithDifferentPayload() throws Exception {
+        inbox.receiveTradeExecuted(event(5));
+
+        assertEquals(BrokerReplayPreflightDecision.IDENTITY_CONFLICT,
+                brokerReplayPreflight.inspect(preflightRequest(event(4))).decision());
+    }
+
     private WalletMessageInbox.InboxEntry claim(String owner) {
         return claim(owner, 30_000);
     }
@@ -238,6 +268,14 @@ class WalletTradeExecutedInboxPostgresIT {
                 .quantity(quantity)
                 .occurredAt(LocalDateTime.now())
                 .build();
+    }
+
+    private BrokerReplayPreflightRequest preflightRequest(TradeExecutedEvent event) throws Exception {
+        return new BrokerReplayPreflightRequest(
+                "wallet.tradeExecuted.queue",
+                "trade.exchange",
+                "trade.executed",
+                objectMapper.writeValueAsString(event));
     }
 
     private String inboxStatus() {

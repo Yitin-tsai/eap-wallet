@@ -1,6 +1,8 @@
 package com.eap.eap_wallet.configuration.recovery;
 
 import com.eap.common.recovery.RecoveryCaseDetail;
+import com.eap.common.recovery.BrokerReplayPreflightRequest;
+import com.eap.common.recovery.BrokerReplayPreflightResult;
 import com.eap.common.recovery.RecoveryCaseSummary;
 import com.eap.common.recovery.RecoveryDryRunRequest;
 import com.eap.common.recovery.RecoveryDryRunResult;
@@ -34,16 +36,27 @@ public class WalletRecoverySourceController {
     public static final String TOKEN_HEADER = "X-EAP-Recovery-Source-Token";
 
     private final WalletRecoveryCaseService service;
+    private final WalletBrokerReplayPreflightService brokerReplayPreflight;
     private final byte[] expectedToken;
 
     public WalletRecoverySourceController(
             WalletRecoveryCaseService service,
+            WalletBrokerReplayPreflightService brokerReplayPreflight,
             @Value("${eap.recovery-source.token}") String expectedToken) {
         if (expectedToken == null || expectedToken.isBlank()) {
             throw new IllegalArgumentException("eap.recovery-source.token must be configured when enabled");
         }
         this.service = service;
+        this.brokerReplayPreflight = brokerReplayPreflight;
         this.expectedToken = expectedToken.getBytes(StandardCharsets.UTF_8);
+    }
+
+    @PostMapping("/broker-dead-letters/preflight")
+    public BrokerReplayPreflightResult brokerReplayPreflight(
+            @RequestHeader(value = TOKEN_HEADER, required = false) String token,
+            @RequestBody BrokerReplayPreflightRequest request) {
+        authorize(token);
+        return brokerReplayPreflight.inspect(request);
     }
 
     @GetMapping("/cases")
