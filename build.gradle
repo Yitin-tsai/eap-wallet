@@ -43,11 +43,15 @@ dependencies {
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     testImplementation 'org.springframework.amqp:spring-rabbit-test'
+    testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation 'org.testcontainers:postgresql'
 }
 
 tasks.named('test') {
     useJUnitPlatform()
     systemProperty 'eap.integration.rabbit', System.getProperty('eap.integration.rabbit', 'false')
+    systemProperty 'eap.integration.postgres', System.getProperty('eap.integration.postgres', 'false')
+    systemProperty 'api.version', System.getProperty('api.version', '1.40')
 }
 
 tasks.register('walletRabbitIntegrationTest', Test) {

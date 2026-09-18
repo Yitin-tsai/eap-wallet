@@ -71,6 +71,9 @@ logging:
     '[org.springframework.web]': INFO
 
 eap:
+  recovery-source:
+    enabled: ${EAP_RECOVERY_SOURCE_ENABLED:false}
+    token: ${EAP_RECOVERY_SOURCE_TOKEN:}
   wallet:
     listeners:
       order-submitted:

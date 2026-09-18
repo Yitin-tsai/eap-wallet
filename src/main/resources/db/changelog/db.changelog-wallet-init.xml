@@ -441,4 +441,18 @@
         </sql>
     </changeSet>
 
+    <changeSet id="wallet-027" author="eap">
+        <comment>Make single-case recovery execution idempotent across control-plane retries</comment>
+        <sql>
+            CREATE TABLE wallet_service.recovery_source_actions (
+                action_id UUID PRIMARY KEY,
+                case_id TEXT NOT NULL,
+                action_type VARCHAR(20) NOT NULL,
+                expected_fingerprint VARCHAR(64) NOT NULL,
+                result_json TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+        </sql>
+    </changeSet>
+
 </databaseChangeLog>
